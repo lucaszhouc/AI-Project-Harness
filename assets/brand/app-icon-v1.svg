@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-labelledby="title desc">
+  <title id="title">AI Project Harness app icon</title>
+  <desc id="desc">Three agent branches lock into one persistent project trunk.</desc>
+  <rect x="64" y="64" width="896" height="896" rx="224" fill="#11120F"/>
+  <g fill="none" stroke="#B8FF00" stroke-width="88" stroke-linecap="square" stroke-linejoin="miter">
+    <path d="M256 256 448 448"/>
+    <path d="M768 256 576 448"/>
+    <path d="M512 256v136"/>
+    <path d="M512 504v264"/>
+  </g>
+  <g fill="#B8FF00">
+    <rect x="196" y="196" width="120" height="120" rx="24"/>
+    <rect x="452" y="196" width="120" height="120" rx="24"/>
+    <rect x="708" y="196" width="120" height="120" rx="24"/>
+    <path d="m512 348 116 116-116 116-116-116z"/>
+    <rect x="452" y="708" width="120" height="120" rx="24"/>
+  </g>
+  <path d="m512 420 44 44-44 44-44-44z" fill="#11120F"/>
+</svg>
