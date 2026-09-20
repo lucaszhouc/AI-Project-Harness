@@ -1,0 +1,104 @@
+{
+  "name": "ai-project-harness",
+  "version": "0.0.21-rc.1",
+  "private": false,
+  "license": "MIT",
+  "description": "Local-first AI project continuity harness desktop MVP",
+  "main": "electron/main.cjs",
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "build": "tsc --noEmit && vite build",
+    "start": "electron .",
+    "smoke:app": "node scripts/app-smoke.mjs",
+    "smoke:portable": "node scripts/portable-smoke.mjs",
+    "smoke:packaged-ui": "node scripts/packaged-ui-smoke.mjs",
+    "smoke:missing-codex": "node scripts/missing-codex-smoke.mjs",
+    "check:release": "npm run check && npm run smoke:renderer && npm run smoke:app && npm run smoke:auto-review",
+    "qualify:release": "node scripts/release-qualification.mjs",
+    "audit:package": "node scripts/package-audit.mjs",
+    "package:win": "electron-builder --win portable",
+    "prepackage:win": "npm run check:release",
+    "test": "node --test tests/*.test.cjs",
+    "smoke:renderer": "npm run build && node scripts/renderer-onboarding-smoke.mjs",
+    "smoke:codex-readonly": "node scripts/real-codex-readonly-smoke.mjs",
+    "smoke:codex-project-readonly": "node scripts/real-codex-project-readonly-smoke.mjs",
+    "smoke:codex-connected": "node scripts/real-connected-flow-smoke.mjs",
+    "smoke:codex-packaged": "node scripts/packaged-codex-readonly-smoke.mjs",
+    "check:packaged-integrity": "node scripts/packaged-runtime-integrity.mjs",
+    "smoke:auto-review": "node scripts/auto-review-smoke.mjs",
+    "test:discovery-stability": "node scripts/project-match-stability.mjs",
+    "harness": "node scripts/harness-cli.mjs",
+    "harness:mcp": "node scripts/harness-mcp.mjs",
+    "mark-progress": "node scripts/mark-progress.mjs",
+    "docs:sync": "node scripts/sync-docs.mjs",
+    "check": "npm run test && npm run build"
+  },
+  "devDependencies": {
+    "electron": "41.3.0",
+    "electron-builder": "^26.0.12",
+    "playwright-core": "^1.62.1",
+    "typescript": "^5.9.2",
+    "vite": "^7.1.7"
+  },
+  "build": {
+    "appId": "com.aiprojectharness.desktop",
+    "productName": "AI Project Harness",
+    "asar": true,
+    "electronDist": "node_modules/electron/dist",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "integrations",
+        "to": "integrations",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "protocol",
+        "to": "protocol",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "electron",
+        "to": "harness-runtime/electron",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "scripts/harness-cli.mjs",
+        "to": "harness-runtime/scripts/harness-cli.mjs"
+      },
+      {
+        "from": "scripts/harness-mcp.mjs",
+        "to": "harness-runtime/scripts/harness-mcp.mjs"
+      },
+      {
+        "from": "integrations/harness-runtime-package.json",
+        "to": "harness-runtime/package.json"
+      }
+    ],
+    "win": {
+      "signAndEditExecutable": false,
+      "target": [
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "AI-Project-Harness-${version}-portable.${ext}"
+    }
+  }
+}

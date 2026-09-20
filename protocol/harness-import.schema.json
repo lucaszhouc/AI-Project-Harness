@@ -1,0 +1,157 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ai-project-harness.local/protocol/harness-import.schema.json",
+  "title": "AI Project Harness Codex Project Import",
+  "description": "A bounded, read-only snapshot returned by an Agent after inspecting an existing Codex Project.",
+  "type": "object",
+  "required": ["version", "type", "generatedAt", "source", "project", "tasks", "sections", "checkpoints", "decisions"],
+  "properties": {
+    "version": { "const": 1 },
+    "type": { "const": "harness-import" },
+    "generatedAt": { "type": "string", "maxLength": 80 },
+    "source": {
+      "type": "object",
+      "required": ["agent", "codexProjectId"],
+      "properties": {
+        "agent": { "type": "string", "maxLength": 60 },
+        "codexProjectId": { "type": "string", "maxLength": 160 },
+        "projectPath": { "type": "string", "maxLength": 800 },
+        "sourceRevision": { "type": ["integer", "string"], "minimum": 0 },
+        "threadIds": { "type": "array", "maxItems": 100, "items": { "type": "string", "maxLength": 160 } }
+      },
+      "additionalProperties": false
+    },
+    "project": {
+      "type": "object",
+      "required": ["name", "path"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "maxLength": 240 },
+        "path": { "type": "string", "maxLength": 800 },
+        "status": { "enum": ["active", "paused", "blocked", "completed", "archived"] },
+        "goal": { "type": "string", "maxLength": 4000 },
+        "objective": { "type": "string", "maxLength": 1200 },
+        "techStack": { "type": "array", "maxItems": 40, "items": { "type": "string", "maxLength": 300 } },
+        "constraints": { "type": "array", "maxItems": 40, "items": { "type": "string", "maxLength": 500 } },
+        "blockers": { "type": "array", "maxItems": 40, "items": { "type": "string", "maxLength": 1000 } },
+        "sourceRevision": { "type": ["integer", "string"], "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "tasks": {
+      "type": "array", "maxItems": 200,
+      "items": { "$ref": "#/$defs/task" }
+    },
+    "sections": {
+      "type": "array", "maxItems": 40,
+      "items": { "$ref": "#/$defs/section" }
+    },
+    "checkpoints": {
+      "type": "array", "maxItems": 200,
+      "items": { "$ref": "#/$defs/checkpoint" }
+    },
+    "decisions": {
+      "type": "array", "maxItems": 200,
+      "items": { "type": ["string", "object"], "maxLength": 2000 }
+    },
+    "sessions": {
+      "type": "array", "maxItems": 100,
+      "items": { "$ref": "#/$defs/session" }
+    },
+    "git": { "$ref": "#/$defs/git" },
+    "github": { "$ref": "#/$defs/github" },
+    "notes": { "type": "array", "maxItems": 40, "items": { "type": "string", "maxLength": 1000 } }
+  },
+  "$defs": {
+    "task": {
+      "type": "object",
+      "required": ["title"],
+      "properties": {
+        "id": { "type": "string", "maxLength": 160 },
+        "externalId": { "type": "string", "maxLength": 160 },
+        "title": { "type": "string", "minLength": 1, "maxLength": 600 },
+        "workstream": { "type": "string", "maxLength": 180 },
+        "status": { "enum": ["backlog", "ready", "in_progress", "awaiting_result", "review", "changes_requested", "accepted", "failed"] },
+        "agent": { "type": "string", "maxLength": 60 },
+        "priority": { "enum": ["low", "normal", "high", "urgent"] },
+        "criteria": { "type": "array", "maxItems": 30, "items": { "type": "string", "maxLength": 600 } },
+        "dependsOn": { "type": "array", "maxItems": 30, "items": { "type": "string", "maxLength": 160 } },
+        "sectionId": { "type": "string", "maxLength": 160 },
+        "section": { "type": "string", "maxLength": 240 },
+        "externalThreadId": { "type": "string", "maxLength": 160 },
+        "createdAt": { "type": "string", "maxLength": 80 },
+        "updatedAt": { "type": "string", "maxLength": 80 },
+        "summary": { "type": "string", "maxLength": 2000 },
+        "nextStep": { "type": "string", "maxLength": 1000 }
+      },
+      "additionalProperties": false
+    },
+    "section": {
+      "type": "object",
+      "required": ["name"],
+      "properties": {
+        "id": { "type": "string", "maxLength": 160 },
+        "name": { "type": "string", "minLength": 1, "maxLength": 300 },
+        "kind": { "enum": ["main", "reusable", "one-shot"] },
+        "role": { "type": "string", "maxLength": 80 },
+        "status": { "type": "string", "maxLength": 60 },
+        "agent": { "type": "string", "maxLength": 60 },
+        "taskIds": { "type": "array", "maxItems": 100, "items": { "type": "string", "maxLength": 160 } },
+        "updatedAt": { "type": "string", "maxLength": 80 }
+      },
+      "additionalProperties": false
+    },
+    "checkpoint": {
+      "type": "object",
+      "required": ["summary"],
+      "properties": {
+        "id": { "type": "string", "maxLength": 160 },
+        "revision": { "type": ["integer", "string"], "minimum": 0 },
+        "summary": { "type": "string", "minLength": 1, "maxLength": 2000 },
+        "nextStep": { "type": "string", "maxLength": 1000 },
+        "acceptedAt": { "type": "string", "maxLength": 80 },
+        "source": { "type": "object", "properties": { "agent": { "type": "string", "maxLength": 60 }, "sessionId": { "type": "string", "maxLength": 160 }, "threadId": { "type": "string", "maxLength": 160 }, "turnId": { "type": "string", "maxLength": 160 } }, "additionalProperties": false },
+        "evidence": { "type": "array", "maxItems": 20, "items": { "type": "object", "properties": { "type": { "type": "string", "maxLength": 80 }, "value": { "type": "string", "maxLength": 1200 } }, "required": ["type", "value"], "additionalProperties": false } }
+      },
+      "additionalProperties": false
+    },
+    "session": {
+      "type": "object",
+      "required": ["title"],
+      "properties": {
+        "id": { "type": "string", "maxLength": 160 },
+        "role": { "type": "string", "maxLength": 80 },
+        "title": { "type": "string", "maxLength": 300 },
+        "status": { "type": "string", "maxLength": 60 },
+        "externalThreadId": { "type": "string", "maxLength": 160 },
+        "updatedAt": { "type": "string", "maxLength": 80 }
+      },
+      "additionalProperties": false
+    },
+    "git": {
+      "type": "object",
+      "properties": {
+        "available": { "type": "boolean" }, "root": { "type": "string", "maxLength": 800 }, "branch": { "type": "string", "maxLength": 160 }, "upstream": { "type": "string", "maxLength": 300 }, "ahead": { "type": "integer", "minimum": 0 }, "behind": { "type": "integer", "minimum": 0 }, "dirty": { "type": "boolean" }, "changeCount": { "type": "integer", "minimum": 0 },
+        "changes": { "type": "array", "maxItems": 100, "items": { "type": "object", "properties": { "code": { "type": "string", "maxLength": 20 }, "file": { "type": "string", "maxLength": 500 } }, "additionalProperties": false } },
+        "commits": { "type": "array", "maxItems": 100, "items": { "type": "object", "properties": { "hash": { "type": "string", "maxLength": 80 }, "shortHash": { "type": "string", "maxLength": 20 }, "subject": { "type": "string", "maxLength": 500 }, "author": { "type": "string", "maxLength": 160 }, "date": { "type": "string", "maxLength": 80 } }, "additionalProperties": false } }
+      },
+      "additionalProperties": false
+    },
+    "github": {
+      "type": "object",
+      "properties": {
+        "available": { "type": "boolean" }, "checkedAt": { "type": "string", "maxLength": 80 }, "remoteName": { "type": "string", "maxLength": 80 },
+        "remote": { "type": "object", "properties": { "owner": { "type": "string", "maxLength": 120 }, "name": { "type": "string", "maxLength": 160 }, "nameWithOwner": { "type": "string", "maxLength": 300 }, "url": { "type": "string", "maxLength": 600 } }, "additionalProperties": false },
+        "repository": { "type": "object", "properties": { "nameWithOwner": { "type": "string", "maxLength": 300 }, "description": { "type": "string", "maxLength": 800 }, "url": { "type": "string", "maxLength": 600 } }, "additionalProperties": false },
+        "pullRequests": { "type": "array", "maxItems": 100, "items": { "$ref": "#/$defs/githubItem" } },
+        "issues": { "type": "array", "maxItems": 100, "items": { "$ref": "#/$defs/githubItem" } }
+      },
+      "additionalProperties": false
+    },
+    "githubItem": {
+      "type": "object",
+      "properties": { "number": { "type": "integer", "minimum": 0 }, "title": { "type": "string", "maxLength": 400 }, "state": { "type": "string", "maxLength": 60 }, "url": { "type": "string", "maxLength": 600 }, "updatedAt": { "type": "string", "maxLength": 80 } },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

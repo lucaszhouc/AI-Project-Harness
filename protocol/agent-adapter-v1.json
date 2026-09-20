@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ai-project-harness.local/protocol/agent-adapter-v1.json",
+  "title": "AI Project Harness Agent Adapter Manifest",
+  "type": "object",
+  "required": ["id", "version", "capabilities", "mode"],
+  "properties": {
+    "id": { "type": "string" },
+    "version": { "type": "string" },
+    "mode": { "enum": ["backend", "user-invoked", "reserved"] },
+    "capabilities": { "type": "array", "items": { "type": "string" } },
+    "skillPath": { "type": "string" }
+  },
+  "additionalProperties": true
+}

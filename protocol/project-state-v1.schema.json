@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ai-project-harness.local/protocol/project-state-v1.schema.json",
+  "title": "AI Project Harness State v1",
+  "type": "object",
+  "required": ["schemaVersion", "selectedProjectId", "projects"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "selectedProjectId": { "type": "string" },
+    "projects": { "type": "array", "items": { "$ref": "#/$defs/project" } }
+  },
+  "$defs": {
+    "project": {
+      "type": "object",
+      "required": ["id", "name", "path", "status", "revision", "tasks", "sessions", "checkpoints"],
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "path": { "type": "string" },
+        "status": { "enum": ["active", "paused", "blocked", "completed", "archived"] },
+        "revision": { "type": "integer", "minimum": 0 },
+        "tasks": { "type": "array" },
+        "sessions": { "type": "array" },
+        "sections": { "type": "array" },
+        "checkpoints": { "type": "array" }
+      },
+      "additionalProperties": true
+    }
+  }
+}

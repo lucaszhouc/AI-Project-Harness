@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ai-project-harness.local/protocol/harness-result.schema.json",
+  "title": "AI Project Harness Task Result",
+  "type": "object",
+  "required": ["summary", "acceptance", "evidence"],
+  "properties": {
+    "summary": { "type": "string", "minLength": 1, "maxLength": 4000 },
+    "completed": { "type": "array", "maxItems": 50, "items": { "type": "string", "maxLength": 800 } },
+    "remaining": { "type": "array", "maxItems": 50, "items": { "type": "string", "maxLength": 800 } },
+    "nextStep": { "type": "string", "maxLength": 2000 },
+    "baseRevision": { "type": ["integer", "string"] },
+    "runId": { "type": "string", "maxLength": 120 },
+    "acceptance": {
+      "type": "array", "maxItems": 50,
+      "items": { "type": "object", "required": ["criterion", "status"], "properties": { "criterion": { "type": "string", "maxLength": 600 }, "status": { "enum": ["pass", "fail", "pending"] } }, "additionalProperties": true }
+    },
+    "evidence": {
+      "type": "array", "maxItems": 50,
+      "items": { "type": "object", "required": ["type", "value"], "properties": { "type": { "type": "string", "maxLength": 80 }, "value": { "type": "string", "maxLength": 1200 } }, "additionalProperties": true }
+    }
+  },
+  "additionalProperties": true
+}

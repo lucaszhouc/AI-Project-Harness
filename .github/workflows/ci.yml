@@ -1,0 +1,40 @@
+name: AI Project Harness CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Use Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Run static, integration and real Electron smoke
+        env:
+          APH_SMOKE_REPORT: ${{ github.workspace }}/qa/app-smoke-report.json
+          APH_AUTO_REVIEW_REPORT: ${{ github.workspace }}/qa/auto-review-report.json
+        run: npm run check:release
+      - name: Upload smoke report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-smoke-report
+          path: qa/app-smoke-report.json
+          if-no-files-found: ignore
+      - name: Upload auto-review smoke report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: auto-review-smoke-report
+          path: qa/auto-review-report.json
+          if-no-files-found: ignore

@@ -1,0 +1,4 @@
+interface:
+  display_name: "AI Project Harness"
+  short_description: "执行 Harness 项目任务并返回有证据的候选结果"
+  default_prompt: "Use $ai-project-harness to execute the injected project task and return a verified candidate result."
