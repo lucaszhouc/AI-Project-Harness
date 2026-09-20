@@ -1,0 +1,30 @@
+const test = require("node:test");
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
+const sm = require("../electron/state-machine.cjs");
+const { HarnessStore } = require("../electron/store.cjs");
+const { projectHealth } = require("../electron/health.cjs");
+
+test("project health reports detached ledger and context readiness", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "aph-health-"));
+  const store = new HarnessStore(path.join(root, "state.json"), path.join(root, "repo"), { contextRoot: root });
+  const project = store.state.projects[0];
+  const health = projectHealth(project, { git: { available: true }, github: { remote: null } });
+  assert.equal(health.checks.state, true);
+  assert.equal(health.checks.context, true);
+  assert.equal(health.checks.ledger, true);
+  assert.equal(health.checks.github, "none");
+  assert.equal(health.checks.codexProject, "none");
+  project.codexProjectId = "official-project";
+  project.codexProjectSync = { state: "desktop-restart-required", checkedAt: "2026-09-04T10:00:00.000Z" };
+  const pending = projectHealth(project, { git: { available: true }, github: { remote: null } });
+  assert.equal(pending.checks.codexProject, false);
+  assert.ok(pending.failures.includes("codexProject"));
+  project.codexProjectSync = { state: "desktop-registered", checkedAt: "2026-09-04T10:01:00.000Z" };
+  const registered = projectHealth(project, { git: { available: true }, github: { remote: null } });
+  assert.equal(registered.checks.codexProject, "desktop-registered");
+  assert.equal(registered.failures.includes("codexProject"), false);
+  fs.rmSync(root, { recursive: true, force: true });
+});
