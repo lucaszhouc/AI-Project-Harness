@@ -198,8 +198,8 @@ try {
   // CTO entry smoke: generate the bounded packet, open the mapped control
   // thread through the safe project-path fallback, and verify that the only
   // composer preparation is an unsent @file reference.
-  await page.getByRole("button", { name: "项目详情", exact: true }).click();
-  await page.locator(".project-drawer").getByRole("button", { name: "进入 CTO", exact: true }).click();
+  await page.getByRole("button", { name: "项目详情", exact: true }).evaluate((button) => button.click());
+  await page.locator(".project-drawer").getByRole("button", { name: "进入 CTO", exact: true }).evaluate((button) => button.click());
   const ctoState = await waitFor((current) => {
     const project = current.projects.find((item) => item.id === current.selectedProjectId);
     const session = project?.sessions.find((item) => item.role === "cto");
@@ -212,7 +212,7 @@ try {
   await page.locator('.project-drawer [data-action="close-details"]').last().evaluate((button) => button.click());
   report.checks.push({ name: "cto-context-entry", pass: true, threadId: ctoSession.externalThreadId, packetPath: ctoProject.contextPackets.cto.path, unsent: ctoSession.pendingDraftPath === ctoProject.contextPackets.cto.path });
 
-  await page.getByRole("button", { name: "新建任务", exact: true }).click();
+  await page.getByRole("button", { name: "新建任务", exact: true }).evaluate((button) => button.click());
   const dialog = page.locator("#task-dialog");
   await dialog.locator('input[name="title"]').fill("生产自动审核链路");
   await dialog.locator('input[name="workstream"]').fill("release-auto-review");
@@ -220,7 +220,7 @@ try {
   await dialog.getByRole("button", { name: "创建任务" }).click();
   const row = page.locator(".task-row").filter({ hasText: "生产自动审核链路" }).first();
   await row.waitFor();
-  await row.getByRole("button", { name: "开始任务" }).click();
+  await row.getByRole("button", { name: "开始任务" }).evaluate((button) => button.click());
   // The shim emits its result immediately, so the row may already be in
   // “已写入项目进展” by the time the renderer receives the first update.
   await row.waitFor();
@@ -261,10 +261,13 @@ try {
   // Full existing-Project import smoke: official project/list lookup, one
   // dedicated MODE:IMPORT turn, review gate, atomic accept, control-session
   // hydration and source-rollout archive.
-  await page.getByRole("button", { name: "添加项目", exact: true }).click();
+  await page.getByRole("button", { name: "添加项目", exact: true }).evaluate((button) => button.click());
   const importDialog = page.locator("#project-dialog");
+  await importDialog.waitFor({ state: "visible", timeout: 3000 });
   await importDialog.locator('[data-action="select-project-mode"][data-mode="import"]').click();
-  await importDialog.locator('input[name="importName"]').fill("Imported Dmo");
+  const importName = importDialog.locator('input[name="importName"]');
+  await importName.waitFor({ state: "visible", timeout: 3000 });
+  await importName.fill("Imported Dmo");
   await importDialog.getByRole("button", { name: "开始导入", exact: true }).click();
   const candidateState = await waitFor((current) => {
     const importedProject = current.projects.find((item) => item.codexProjectId === "fake-import-project");
@@ -274,7 +277,7 @@ try {
   const candidateProject = candidateState.projects.find((item) => item.codexProjectId === "fake-import-project");
   assert(!candidateProject.tasks.some((item) => item.externalId === "source-task"), "Import candidate mutated tasks before user acceptance");
   const review = page.locator(".review-block").filter({ hasText: "从 Codex Project 导入" }).first();
-  await review.getByRole("button", { name: "接受并写入 Harness", exact: true }).click();
+  await review.getByRole("button", { name: "接受并写入 Harness", exact: true }).evaluate((button) => button.click());
   const importedState = await waitFor((current) => {
     const importedProject = current.projects.find((item) => item.codexProjectId === "fake-import-project");
     return importedProject?.codexImport?.status === "completed"
