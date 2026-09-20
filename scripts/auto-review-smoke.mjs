@@ -43,7 +43,7 @@ function writeFakeCodex() {
   execFileSync("git", ["-C", sourceProjectRoot, "commit", "-m", "initial import fixture"], { windowsHide: true, stdio: "ignore" });
   execFileSync("git", ["-C", sourceProjectRoot, "remote", "add", "origin", "https://github.com/owner/demo.git"], { windowsHide: true });
   fs.writeFileSync(sourceRolloutPath, `${JSON.stringify({ at: "2026-09-03T00:00:00.000Z", message: "old project context" })}\n${JSON.stringify({ at: "2026-09-05T00:00:00.000Z", message: "latest project progress" })}\n`, "utf8");
-  fs.writeFileSync(path.join(fakeCodexRoot, "codex.cmd"), "@echo off\r\nnode \"%~dp0fake-codex.mjs\" %*\r\n", "utf8");
+  fs.writeFileSync(path.join(fakeCodexRoot, "codex.cmd"), `@echo off\r\n"${process.execPath}" "%~dp0fake-codex.mjs" %*\r\n`, "utf8");
   fs.writeFileSync(path.join(fakeCodexRoot, "fake-codex.mjs"), String.raw`import fs from "node:fs";
 import readline from "node:readline";
 
