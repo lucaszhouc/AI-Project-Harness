@@ -209,7 +209,7 @@ try {
   const ctoSession = ctoProject.sessions.find((item) => item.role === "cto");
   assert(fs.existsSync(ctoProject.contextPackets.cto.path), "CTO context packet missing");
   assert(fs.readFileSync(ctoProject.contextPackets.cto.path, "utf8").includes("SESSION_ROLE: CTO"), "CTO packet role missing");
-  await page.locator(".project-drawer").getByRole("button", { name: "关闭项目详情" }).click();
+  await page.locator('.project-drawer [data-action="close-details"]').last().evaluate((button) => button.click());
   report.checks.push({ name: "cto-context-entry", pass: true, threadId: ctoSession.externalThreadId, packetPath: ctoProject.contextPackets.cto.path, unsent: ctoSession.pendingDraftPath === ctoProject.contextPackets.cto.path });
 
   await page.getByRole("button", { name: "新建任务", exact: true }).click();
