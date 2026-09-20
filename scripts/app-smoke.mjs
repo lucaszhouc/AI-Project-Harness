@@ -132,20 +132,11 @@ try {
   await page.locator('[data-action="guide-locale"]').click();
   await page.getByRole("button", { name: "新建任务", exact: true }).waitFor();
 
-  const topNewConversation = page.getByRole("button", { name: "新对话", exact: true });
-  const conversationOpenedFromDrawer = !(await topNewConversation.isVisible());
-  if (conversationOpenedFromDrawer) {
-    await page.getByRole("button", { name: "项目详情", exact: true }).click();
-    await page.waitForFunction(() => document.querySelector(".project-drawer")?.getAttribute("aria-hidden") === "false");
-    await page.getByRole("button", { name: "新建项目对话", exact: true }).click();
-  } else {
-    await topNewConversation.click();
-  }
+  await page.locator('[data-action="new-conversation"]').first().evaluate((button) => button.click());
   const conversationDialog = page.locator("#conversation-dialog");
   await conversationDialog.waitFor({ state: "visible", timeout: 3000 });
   assert(await conversationDialog.locator('select[name="agent"] option[value="codex"]').count() === 1, "Project conversation agent selector is missing");
   await conversationDialog.locator('[data-close]').first().click();
-  if (conversationOpenedFromDrawer) await page.locator('.project-drawer [data-action="close-details"]').click();
 
   await page.evaluate(() => {
     window.__aphRefreshTrace = [];
