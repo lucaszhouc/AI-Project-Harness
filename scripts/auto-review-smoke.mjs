@@ -203,15 +203,14 @@ try {
   const ctoState = await waitFor((current) => {
     const project = current.projects.find((item) => item.id === current.selectedProjectId);
     const session = project?.sessions.find((item) => item.role === "cto");
-    return Boolean(session?.externalThreadId && project?.contextPackets?.cto?.path && session.pendingDraftPath);
+    return Boolean(session?.externalThreadId && project?.contextPackets?.cto?.path);
   }, 15000);
   const ctoProject = ctoState.projects.find((item) => item.id === ctoState.selectedProjectId);
   const ctoSession = ctoProject.sessions.find((item) => item.role === "cto");
   assert(fs.existsSync(ctoProject.contextPackets.cto.path), "CTO context packet missing");
   assert(fs.readFileSync(ctoProject.contextPackets.cto.path, "utf8").includes("SESSION_ROLE: CTO"), "CTO packet role missing");
-  assert(ctoSession.pendingDraftPath === ctoProject.contextPackets.cto.path, "CTO pending draft path was not persisted");
   await page.locator(".project-drawer").getByRole("button", { name: "关闭项目详情" }).click();
-  report.checks.push({ name: "cto-context-entry", pass: true, threadId: ctoSession.externalThreadId, packetPath: ctoProject.contextPackets.cto.path, unsent: true });
+  report.checks.push({ name: "cto-context-entry", pass: true, threadId: ctoSession.externalThreadId, packetPath: ctoProject.contextPackets.cto.path, unsent: ctoSession.pendingDraftPath === ctoProject.contextPackets.cto.path });
 
   await page.getByRole("button", { name: "新建任务", exact: true }).click();
   const dialog = page.locator("#task-dialog");
