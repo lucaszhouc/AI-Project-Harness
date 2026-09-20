@@ -323,3 +323,4 @@ try {
 
 process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
 if (report.pass) process.stdout.write(`SMOKE_PASS: ${reportPath}\n`);
+else process.exit(1);
