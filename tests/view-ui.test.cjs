@@ -194,6 +194,54 @@ test("renderer exposes Hermes Sections, task reassignment, and dependency choice
   assert.match(codexHtml, /title="开始任务后注入 Codex"/);
 });
 
+test("unrecoverable state is shown as an explicit safe recovery mode", () => {
+  const { renderApp } = loadViewModule();
+  const snapshot = fixture(true);
+  snapshot.state.recovery = {
+    mode: "safe-recovery",
+    status: "unrecoverable",
+    detail: "检测到既有状态，但主文件和日志都无法恢复。",
+  };
+  snapshot.state.projects[0].tasks[0] = {
+    ...snapshot.state.projects[0].tasks[0],
+    status: "review",
+    candidate: { summary: "待恢复", completed: [], remaining: [], nextStep: "先恢复", acceptance: [], evidence: [] },
+    run: { id: "run-recovery", sessionId: "session-hermes", baseRevision: 3, startedAt: "2026-09-04T00:00:00.000Z", status: "awaiting_review" },
+    review: { status: "legacy_unverified", agent: "codex", automatic: false },
+  };
+  const html = renderApp(snapshot);
+  assert.match(html, /安全恢复模式/);
+  assert.match(html, /没有把空状态当作原项目/);
+  assert.match(html, /恢复可信状态后才能接受/);
+  assert.doesNotMatch(html, /data-action="accept"/);
+});
+
+test("inconclusive automatic evidence stays visibly behind human confirmation", () => {
+  const { renderApp } = loadViewModule();
+  const snapshot = fixture(true);
+  const project = snapshot.state.projects[0];
+  project.tasks[0] = {
+    ...project.tasks[0],
+    status: "review",
+    reviewMode: "auto",
+    candidate: { summary: "证据不完整", completed: [], remaining: [], nextStep: "人工确认", acceptance: [], evidence: [] },
+    run: { id: "run-review", sessionId: "session-hermes", baseRevision: 3, startedAt: "2026-09-04T00:00:00.000Z", status: "awaiting_review", resultSource: "agent-auto" },
+    review: { status: "inconclusive", agent: "codex", automatic: false },
+  };
+  const html = renderApp(snapshot);
+  assert.match(html, /等待你的确认/);
+  assert.match(html, /接受并推进 HEAD/);
+  assert.doesNotMatch(html, /Review Agent 自动审核中/);
+  assert.doesNotMatch(html, /Review Agent 后台审核中/);
+});
+
+test("task session copy describes logical workstream reuse instead of provider-thread resume", () => {
+  const { renderApp } = loadViewModule();
+  const html = renderApp(fixture(true));
+  assert.match(html, /<option value="warm">复用工作流<\/option>/);
+  assert.match(html, /研究接力<\/span><span>复用工作流<\/span>/);
+});
+
 test("project onboarding clearly separates blank creation from Codex project import", () => {
   const { renderApp } = loadViewModule();
   const html = renderApp(fixture(true));

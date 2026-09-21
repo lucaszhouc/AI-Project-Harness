@@ -57,6 +57,7 @@ export interface Task {
   sessionPolicy: SessionPolicy;
   status: TaskStatus;
   baseRevision: number;
+  contractRevision?: number;
   createdAt: string;
   sectionId?: string;
   reviewMode?: "user" | "auto";
@@ -69,6 +70,7 @@ export interface Task {
     id: string;
     sessionId: string;
     baseRevision: number;
+    contractRevision?: number;
     startedAt: string;
     status?: "starting" | "running" | "imported" | "completed" | "awaiting_review" | "awaiting_user" | "failed";
     phase?: string;
@@ -101,7 +103,7 @@ export interface Task {
   importCandidateHash?: string;
   importAppliedAt?: string;
   review?: {
-    status: "queued" | "approved" | "changes_requested";
+    status: "queued" | "approved" | "changes_requested" | "inconclusive" | "legacy_unverified";
     agent: AgentId;
     sessionId?: string;
     queuedAt?: string;
@@ -183,6 +185,7 @@ export interface Project {
   path: string;
   status: string;
   revision: number;
+  contractRevision?: number;
   goal: string;
   objective: { id: string; title: string; status: string };
   source?: { kind: string; label: string };
@@ -278,7 +281,12 @@ export interface GitHubState {
 
 export interface Snapshot {
   sequence?: number;
-  state: { schemaVersion: number; selectedProjectId: string; projects: Project[] };
+  state: {
+    schemaVersion: number;
+    selectedProjectId: string;
+    projects: Project[];
+    recovery?: { mode: string; status: string; detail?: string; source?: string; skippedCorruptJournalLines?: number; recoveredAt?: string };
+  };
   git: Record<string, GitState>;
   github?: Record<string, GitHubState>;
   archives?: Record<string, Array<Record<string, unknown>>>;

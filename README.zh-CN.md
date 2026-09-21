@@ -2,7 +2,7 @@
 
 > Windows 上本地优先的编程 Agent 工程连续性工具。
 
-[![Release](https://img.shields.io/github/v/release/lucaszhouc/AI-Project-Harness?include_prereleases)](https://github.com/lucaszhouc/AI-Project-Harness/releases/tag/v0.0.21-rc.1) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE) [![Platform](https://img.shields.io/badge/platform-Windows%20x64-0078D4)](https://github.com/lucaszhouc/AI-Project-Harness/releases/tag/v0.0.21-rc.1) [![Electron](https://img.shields.io/badge/Electron-41-47848F)](https://www.electronjs.org/)
+[![Release](https://img.shields.io/github/v/release/lucaszhouc/AI-Project-Harness)](https://github.com/lucaszhouc/AI-Project-Harness/releases/latest) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE) [![Platform](https://img.shields.io/badge/platform-Windows%20x64-0078D4)](https://github.com/lucaszhouc/AI-Project-Harness/releases/latest) [![Electron](https://img.shields.io/badge/Electron-41-47848F)](https://www.electronjs.org/)
 
 **Git 记住代码怎么变，Harness 记住项目为什么这样变。**
 
@@ -21,7 +21,7 @@ AI Project Harness 会保存项目目标、任务、重要决定和审核结果�
 
 ## 支持的发行路径
 
-请从精确的 [`v0.0.21-rc.1` 预发布页面](https://github.com/lucaszhouc/AI-Project-Harness/releases/tag/v0.0.21-rc.1)下载 Windows x64 portable EXE，并把字节数和 SHA-256 与随附 manifest 对照；预发布不要使用 `/releases/latest`。
+请直接从唯一的[最新版本页面](https://github.com/lucaszhouc/AI-Project-Harness/releases/latest)下载 Windows x64 portable EXE，并把字节数和 SHA-256 与随附 manifest 对照。仓库只保留一个受支持的公开 Release，新用户不需要分辨版本。
 
 运行打包 EXE 不需要源码或开发构建环境。当前 Codex adapter 在连接、导入和执行任务时需要兼容的 Codex CLI；没有 Codex 仍可建立本地项目和保存任务草稿。见[连接 Codex](docs/guide/connect-codex.zh-CN.md)。
 
@@ -67,8 +67,8 @@ Harness 不请求或保存 OAuth code、密码、cookie 或 token。公开文档
 ## 发布状态
 
 <!-- APH_AUTO_STATUS_START -->
-- 包版本：v0.0.21-rc.1
-- 发布状态：GitHub 公开预发布候选。
+- 包版本：v0.0.22
+- 发布状态：当前 GitHub 正式公开版本。
 - 有意排除本机项目名称和宿主状态。
 <!-- APH_AUTO_STATUS_END -->
 

@@ -7,21 +7,22 @@ const { listArchiveManifests } = require("./archive.cjs");
 const { syncSqliteIndex } = require("./sqlite-index.cjs");
 const { acquireStateLock, releaseStateLock } = require("./state-lock.cjs");
 
-function autoReviewLegacyCandidates(state) {
+function protectLegacyCandidates(state) {
   let changed = false;
   for (const project of state?.projects || []) {
     for (const task of project.tasks || []) {
-      // Profiles created before Review Agent automation have a candidate in
-      // `review` without review metadata. Re-run the same deterministic review
-      // path used for live harness-result events during startup migration.
+      // A storage migration may fill structure, but it must never create a new
+      // business approval. Preserve old candidates for explicit user review.
       if (task.status !== "review" || !task.candidate || task.review) continue;
-      try {
-        machine.autoReviewTaskResult(state, project.id, task.id);
-        changed = true;
-      } catch {
-        // Keep the legacy candidate visible if its schema is incomplete; the
-        // normal recovery UI can still surface and repair it.
-      }
+      task.review = {
+        status: "legacy_unverified",
+        agent: "codex",
+        automatic: false,
+        sessionId: project.controlSessions?.reviewId,
+        reviewedAt: project.updatedAt,
+        notes: "旧候选已保留，但迁移不会代替用户批准或补造验证证据。",
+      };
+      changed = true;
     }
   }
   return changed;
@@ -47,6 +48,8 @@ class HarnessStore {
     this._lock = undefined;
     this.state = this.load();
     this.lastKnownMtimeMs = this.readMtime();
+    this.lastKnownFingerprint = this.readFingerprint();
+    this.lastCommittedState = structuredClone(this.state);
     if (this.contextRoot) {
       let archiveChanged = false;
       for (const project of this.state.projects || []) {
@@ -58,7 +61,7 @@ class HarnessStore {
       }
       if (archiveChanged) this.write(this.state);
     }
-    if (autoReviewLegacyCandidates(this.state)) this.write(this.state);
+    if (protectLegacyCandidates(this.state)) this.write(this.state);
     // Existing profiles may predate context packets. Generate them once at
     // startup so every project has a durable CTO and bounded Review packet.
     if (this.contextRoot && persistContextPackets(this.state, this.contextRoot)) this.write(this.state);
@@ -97,6 +100,10 @@ class HarnessStore {
         machine.ensureProjectSections(project);
         machine.ensureObjectives(project);
         project.status ||= "active";
+        if (!Number.isInteger(Number(project.contractRevision)) || Number(project.contractRevision) < 1) {
+          project.contractRevision = 1;
+          migrated = true;
+        }
         project.techStack ||= [];
         project.constraints ||= [];
         project.gitPolicy ||= { mode: "evidence-only", commitOnAccept: false };
@@ -146,7 +153,11 @@ class HarnessStore {
       return parsed;
     } catch (error) {
       const backup = `${this.filePath}.corrupt-${Date.now()}`;
-      try { fs.renameSync(this.filePath, backup); } catch {
+      let damagedProfilePath = this.filePath;
+      try {
+        fs.renameSync(this.filePath, backup);
+        damagedProfilePath = backup;
+      } catch {
         // Keep going when a profile is read-only; journal/seed recovery below
         // still gives the user a usable local state instead of a crash.
       }
@@ -156,6 +167,13 @@ class HarnessStore {
         return recovered;
       }
       const initial = this.initialStateMode === "empty" ? machine.createEmptyState() : machine.createInitialState(this.projectPath);
+      initial.recovery = {
+        mode: "safe-recovery",
+        status: "unrecoverable",
+        damagedProfilePath,
+        detectedAt: new Date().toISOString(),
+        detail: "检测到既有状态，但主文件和日志都无法恢复；已进入安全恢复模式，未把空状态冒充为原项目。",
+      };
       this.write(initial);
       return initial;
     }
@@ -163,6 +181,24 @@ class HarnessStore {
 
   readMtime() {
     try { return fs.statSync(this.filePath).mtimeMs; } catch { return 0; }
+  }
+
+  readFingerprint() {
+    try {
+      const stat = fs.statSync(this.filePath);
+      return `${stat.mtimeMs}:${stat.size}`;
+    } catch {
+      return "";
+    }
+  }
+
+  replaceLiveState(nextState) {
+    if (!this.state) {
+      this.state = nextState;
+      return;
+    }
+    for (const key of Object.keys(this.state)) delete this.state[key];
+    Object.assign(this.state, nextState);
   }
 
   /** Reload a state written by the standalone CLI/MCP bridge. Atomic rename
@@ -180,6 +216,9 @@ class HarnessStore {
         project.decisions ||= [];
         project.events ||= [];
         project.status ||= "active";
+        project.contractRevision = Number.isInteger(Number(project.contractRevision)) && Number(project.contractRevision) > 0
+          ? Number(project.contractRevision)
+          : 1;
         project.techStack ||= [];
         project.constraints ||= [];
         project.gitPolicy ||= { mode: "evidence-only", commitOnAccept: false };
@@ -198,6 +237,8 @@ class HarnessStore {
       for (const key of Object.keys(this.state || {})) delete this.state[key];
       Object.assign(this.state, parsed);
       this.lastKnownMtimeMs = mtime;
+      this.lastKnownFingerprint = this.readFingerprint();
+      this.lastCommittedState = structuredClone(parsed);
       return true;
     } catch {
       return false;
@@ -206,16 +247,31 @@ class HarnessStore {
 
   recoverFromJournal() {
     const candidates = [this.journalPath, ...Array.from({ length: this.journalRotations }, (_, index) => `${this.journalPath}.${index + 1}`)];
+    let skippedCorruptJournalLines = 0;
     for (const candidate of candidates) {
       if (!fs.existsSync(candidate)) continue;
+      let lines;
       try {
-        const lines = fs.readFileSync(candidate, "utf8").split(/\r?\n/).filter(Boolean);
-        for (let index = lines.length - 1; index >= 0; index -= 1) {
-          const entry = JSON.parse(lines[index]);
-          if (entry?.state?.schemaVersion === 1 && Array.isArray(entry.state.projects)) return entry.state;
-        }
+        lines = fs.readFileSync(candidate, "utf8").split(/\r?\n/).filter(Boolean);
       } catch {
-        // Try the next rotated journal; a truncated tail must not block recovery.
+        continue;
+      }
+      for (let index = lines.length - 1; index >= 0; index -= 1) {
+        try {
+          const entry = JSON.parse(lines[index]);
+          if (entry?.state?.schemaVersion === 1 && Array.isArray(entry.state.projects)) {
+            entry.state.recovery = {
+              mode: "journal-recovery",
+              status: "recovered",
+              source: candidate,
+              skippedCorruptJournalLines,
+              recoveredAt: new Date().toISOString(),
+            };
+            return entry.state;
+          }
+        } catch {
+          skippedCorruptJournalLines += 1;
+        }
       }
     }
     return undefined;
@@ -224,7 +280,16 @@ class HarnessStore {
   write(nextState = this.state) {
     const lock = this._lock ? undefined : acquireStateLock(this.lockPath, { timeoutMs: this.lockTimeoutMs, staleMs: this.lockStaleMs });
     try {
+      const fingerprint = this.readFingerprint();
+      if (!this._lock && this.lastKnownFingerprint && fingerprint && fingerprint !== this.lastKnownFingerprint) {
+        this.reloadExternal(true);
+        throw new Error("STATE_CONFLICT: durable state changed since this writer last loaded it");
+      }
       this._writeUnlocked(nextState);
+      this.lastCommittedState = structuredClone(nextState);
+    } catch (error) {
+      if (this.lastCommittedState) this.replaceLiveState(structuredClone(this.lastCommittedState));
+      throw error;
     } finally {
       if (lock) releaseStateLock(lock);
     }
@@ -233,12 +298,28 @@ class HarnessStore {
   _writeUnlocked(nextState = this.state) {
     fs.mkdirSync(path.dirname(this.filePath), { recursive: true });
     if (this.boundHistory) for (const project of nextState.projects || []) machine.boundProjectHistory(project);
+    const commitPrimary = (content, required) => {
+      const temporary = `${this.filePath}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+      try {
+        fs.writeFileSync(temporary, content, "utf8");
+        fs.renameSync(temporary, this.filePath);
+        return true;
+      } catch (error) {
+        try { fs.rmSync(temporary, { force: true }); } catch {}
+        if (required) throw error;
+        return false;
+      }
+    };
+    const committedSerialized = `${JSON.stringify(nextState, null, 2)}\n`;
+    commitPrimary(committedSerialized, true);
+    this.lastKnownMtimeMs = this.readMtime();
+    this.lastKnownFingerprint = this.readFingerprint();
     if (this.contextRoot) {
       try {
         persistContextPackets(nextState, this.contextRoot);
       } catch {
         // Context projections are derived artifacts. A failed projection must
-        // never prevent the primary state and replay journal from being saved.
+        // never turn an already committed primary state into a failed command.
       }
       try {
         persistProjectLedger(nextState, this.contextRoot);
@@ -247,11 +328,11 @@ class HarnessStore {
         // data disk is temporarily unavailable.
       }
     }
-    const serialized = `${JSON.stringify(nextState, null, 2)}\n`;
-    const temporary = `${this.filePath}.tmp-${process.pid}-${Date.now()}`;
-    fs.writeFileSync(temporary, serialized, "utf8");
-    fs.renameSync(temporary, this.filePath);
-    this.lastKnownMtimeMs = this.readMtime();
+    const projectedSerialized = `${JSON.stringify(nextState, null, 2)}\n`;
+    if (projectedSerialized !== committedSerialized && commitPrimary(projectedSerialized, false)) {
+      this.lastKnownMtimeMs = this.readMtime();
+      this.lastKnownFingerprint = this.readFingerprint();
+    }
     if (this.persistJournal) {
       try {
         const line = `${JSON.stringify({ at: new Date().toISOString(), schemaVersion: nextState.schemaVersion, state: nextState })}\n`;
@@ -289,8 +370,11 @@ class HarnessStore {
       // makes this read all-or-nothing while the lock prevents another
       // Harness writer from changing it before our write.
       this.reloadExternal(true);
-      const result = mutator(this.state);
-      this._writeUnlocked(this.state);
+      const draft = structuredClone(this.state);
+      const result = mutator(draft);
+      this._writeUnlocked(draft);
+      this.replaceLiveState(draft);
+      this.lastCommittedState = structuredClone(draft);
       return result;
     } finally {
       this._lock = undefined;

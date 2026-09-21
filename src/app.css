@@ -7,6 +7,10 @@
 
 .app-shell--empty { grid-template: minmax(0, 1fr) / minmax(0, 1fr) 340px; }
 .app-shell--empty .fatal-empty { grid-column: 1; }
+
+.recovery-banner { padding: 14px 16px; border: 1px solid #d7a23d; background: #fff4d6; color: #4f3710; }
+.recovery-banner strong { display: block; margin-bottom: 4px; }
+.recovery-banner p { margin: 0; color: inherit; }
 .app-shell--empty .getting-started { grid-row: 1; }
 
 .topbar {

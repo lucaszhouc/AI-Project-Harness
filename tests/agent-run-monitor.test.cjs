@@ -88,10 +88,10 @@ test("agent monitor marks failed turns and never leaves a stale in-progress task
   assert.equal(task.run.error, "编译失败");
 });
 
-test("late turn completion cannot regress an auto-accepted task session", async () => {
+test("auto-review waits for bound terminal completion and advances only once", async () => {
   const state = machine.createInitialState("C:\\fixture");
   const project = state.projects[0];
-  const task = machine.createTask(state, project.id, { title: "自动审核后结束" });
+  const task = machine.createTask(state, project.id, { title: "自动审核后结束", criteria: "可验证" });
   machine.dispatchTask(state, project.id, task.id);
   machine.attachExternalThread(state, project.id, task.id, { threadId: "thread-late", turnId: "turn-late" });
   const monitor = createAgentRunMonitor({ state, projectId: project.id, taskId: task.id, autoReview: true });
@@ -99,11 +99,10 @@ test("late turn completion cannot regress an auto-accepted task session", async 
     method: "item/completed",
     params: { threadId: "thread-late", turnId: "turn-late", item: { type: "agentMessage", text: resultText("自动通过") } },
   });
-  assert.equal(task.status, "accepted");
-  const session = project.sessions.find((item) => item.id === task.run.sessionId);
-  assert.equal(session.status, "warm");
+  assert.equal(task.status, "in_progress");
   await monitor.handleNotification({ method: "turn/completed", params: { threadId: "thread-late", turnId: "turn-late", turn: { status: "completed" } } });
   assert.equal(task.status, "accepted");
+  const session = project.sessions.find((item) => item.id === task.run.sessionId);
   assert.equal(task.run.status, "completed");
   assert.equal(session.status, "warm");
 });
@@ -136,7 +135,7 @@ test("repeated output is not resubmitted through a stale task reference after st
   const state = machine.createInitialState("C:\\fixture\\stale-monitor-task");
   const project = state.projects[0];
   project.tasks = [];
-  const staleTask = machine.createTask(state, project.id, { title: "候选只提交一次" });
+  const staleTask = machine.createTask(state, project.id, { title: "候选只提交一次", criteria: "可验证" });
   machine.dispatchTask(state, project.id, staleTask.id);
   machine.attachExternalThread(state, project.id, staleTask.id, { threadId: "stale-thread", turnId: "stale-turn" });
   const monitor = createAgentRunMonitor({ state, projectId: project.id, taskId: staleTask.id, autoReview: true });
@@ -144,10 +143,9 @@ test("repeated output is not resubmitted through a stale task reference after st
     method: "item/completed",
     params: { threadId: "stale-thread", turnId: "stale-turn", item: { type: "agentMessage", text: resultText("一次候选") } },
   });
-  assert.equal(staleTask.status, "accepted");
+  assert.equal(staleTask.status, "in_progress");
   const durableTask = structuredClone(staleTask);
   project.tasks[0] = durableTask;
-  staleTask.status = "in_progress";
   await assert.doesNotReject(() => monitor.handleNotification({
     method: "turn/completed",
     params: { threadId: "stale-thread", turnId: "stale-turn", turn: { status: "completed", output: resultText("一次候选") } },

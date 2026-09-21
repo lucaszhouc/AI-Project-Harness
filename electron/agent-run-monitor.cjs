@@ -41,15 +41,32 @@ function parseHarnessResult(text) {
   const source = String(text || "");
   RESULT_BLOCK.lastIndex = 0;
   let match;
+  let latest = null;
   while ((match = RESULT_BLOCK.exec(source))) {
     try {
       const parsed = normalizeCandidate(JSON.parse(match[1].trim()));
-      if (parsed) return parsed;
+      if (parsed) latest = parsed;
     } catch {
       // Keep scanning: an agent may have emitted an incomplete block before the final one.
     }
   }
-  return null;
+  return latest;
+}
+
+function authoritativeResultText(message, maxStringChars = 12000) {
+  const method = String(message?.method || "");
+  const params = message?.params || {};
+  if (method === "item/completed") {
+    const item = params.item || {};
+    const itemType = String(item.type || item.itemType || "").toLowerCase();
+    if (itemType !== "agentmessage" && itemType !== "assistantmessage") return "";
+    return collectText(item, 0, new Set(), maxStringChars).join("\n");
+  }
+  if (method === "turn/completed") {
+    const output = params.turn?.output ?? params.output ?? params.result?.output;
+    return collectText({ output }, 0, new Set(), maxStringChars).join("\n");
+  }
+  return "";
 }
 
 function collectText(value, depth = 0, seen = new Set(), maxStringChars = 12000) {
@@ -111,6 +128,8 @@ function createAgentRunMonitor({ state, projectId, taskId, readGit = async () =>
   const task = project.tasks.find((item) => item.id === taskId);
   if (!task) throw new Error("Task not found");
 
+  const currentTask = () => machine.getProject(state, projectId).tasks.find((item) => item.id === taskId);
+
   async function publish(event) {
     if (["completed", "failed"].includes(event?.kind)) {
       const immediate = { project: machine.getProject(state, projectId), task: machine.getProject(state, projectId).tasks.find((item) => item.id === taskId), event, git: project.gitSnapshot };
@@ -131,29 +150,33 @@ function createAgentRunMonitor({ state, projectId, taskId, readGit = async () =>
 
   async function handleNotification(message) {
     try { await onRawMessage(message); } catch { /* raw archival is best effort; state updates must continue */ }
+    if (terminal) return null;
     const params = message?.params || {};
     const threadId = params.threadId || params.thread?.id;
     const turnId = params.turnId || params.turn?.id;
-    if (threadId && task.run?.externalThreadId && String(threadId) !== String(task.run.externalThreadId)) return null;
-    if (turnId && task.run?.externalTurnId && String(turnId) !== String(task.run.externalTurnId)) return null;
+    const activeTask = currentTask();
+    if (!activeTask?.run) return null;
+    if (activeTask.run.externalThreadId && String(threadId || "") !== String(activeTask.run.externalThreadId)) return null;
+    if (activeTask.run.externalTurnId && String(turnId || "") !== String(activeTask.run.externalTurnId)) return null;
     const event = eventForNotification(message);
-    const text = collectText(params, 0, new Set(), importMode ? IMPORT_OUTPUT_MAX_CHARS : 12000).join("\n");
+    const text = authoritativeResultText(message, outputMaxChars);
     if (text) output = `${output}\n${text}`.slice(-outputMaxChars);
     machine.recordAgentEvent(state, projectId, taskId, event);
-    const candidate = importMode ? (() => { try { return parseHarnessImport(output); } catch { return null; } })() : parseHarnessResult(output);
-    if (importMode && candidate && !candidateSubmitted && ["in_progress", "awaiting_result"].includes(task.status)) {
-      await onImportCandidate(candidate, { projectId, taskId, threadId, turnId });
-      candidateSubmitted = true;
-    } else if (candidate && !candidateSubmitted && ["in_progress", "awaiting_result"].includes(task.status)) {
-      machine.submitTaskResult(state, projectId, taskId, { ...candidate, source: "agent-auto" });
-      candidateSubmitted = true;
-      if (autoReview) machine.autoReviewTaskResult(state, projectId, taskId);
-    }
     if (event.kind === "failed") {
       machine.markRunFailed(state, projectId, taskId, event.detail);
       terminal = true;
     } else if (event.kind === "completed") {
+      const candidate = importMode ? (() => { try { return parseHarnessImport(output); } catch { return null; } })() : parseHarnessResult(output);
+      const terminalTask = currentTask();
+      if (importMode && candidate && !candidateSubmitted && ["in_progress", "awaiting_result"].includes(terminalTask.status)) {
+        await onImportCandidate(candidate, { projectId, taskId, threadId, turnId });
+        candidateSubmitted = true;
+      } else if (candidate && !candidateSubmitted && ["in_progress", "awaiting_result"].includes(terminalTask.status)) {
+        machine.submitTaskResult(state, projectId, taskId, { ...candidate, source: "agent-auto" });
+        candidateSubmitted = true;
+      }
       machine.markRunCompleted(state, projectId, taskId, event.detail);
+      if (!importMode && candidateSubmitted && autoReview) machine.autoReviewTaskResult(state, projectId, taskId);
       terminal = true;
     }
     return publish(event);

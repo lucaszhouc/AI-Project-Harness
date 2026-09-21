@@ -42,8 +42,8 @@ test("ordinary candidate and Review remain behind explicit human Accept", () => 
   assert.throws(() => machine.acceptTaskResult(state, project.id, task.id), /No candidate result to accept/);
 });
 
-test("explicit auto-review advances once and cannot be regressed by later completion", async () => {
-  const { state, project, task } = fixture("Auto review", { reviewMode: "auto" });
+test("explicit auto-review advances once after terminal completion", async () => {
+  const { state, project, task } = fixture("Auto review", { reviewMode: "auto", criteria: "release contract" });
   machine.dispatchTask(state, project.id, task.id);
   machine.attachExternalThread(state, project.id, task.id, { threadId: "auto-thread", turnId: "auto-turn" });
   const monitor = createAgentRunMonitor({ state, projectId: project.id, taskId: task.id, autoReview: true });
@@ -55,8 +55,8 @@ test("explicit auto-review advances once and cannot be regressed by later comple
       item: { type: "agentMessage", text: `\`\`\`harness-result\n${JSON.stringify(result("auto"))}\n\`\`\`` },
     },
   });
-  assert.equal(project.revision, 2);
-  assert.equal(task.status, "accepted");
+  assert.equal(project.revision, 1);
+  assert.equal(task.status, "in_progress");
   await monitor.handleNotification({ method: "turn/completed", params: { threadId: "auto-thread", turnId: "auto-turn", turn: { status: "completed" } } });
   assert.equal(project.revision, 2);
   assert.equal(task.status, "accepted");

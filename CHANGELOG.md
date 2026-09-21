@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.0.22 — 2026-09-21
+
+- Rejects automatic acceptance when required checks are empty, pending, missing, duplicated, or unsupported by evidence.
+- Keeps migrated legacy candidates explicitly unverified instead of creating approval during startup.
+- Accepts structured Agent results only from the bound successful terminal channel; tool output and pre-terminal text cannot create candidates.
+- Recovers the newest complete snapshot before a truncated JSONL tail and enters a visible restricted recovery mode when no trusted state remains.
+- Makes state updates draft-first, detects stale writers, and commits primary state before derived projections.
+- Adds contract revisions so results from an older goal or constraint set are rejected.
+- Sends a self-contained FULL packet to every fresh provider thread and clarifies that workstream reuse is not provider-thread resume.
+- Adds the P0 baseline/implementation reports and expands the release gate to 302 automated tests plus hidden Electron smoke.
+- Human Windows/Codex cold-start and 30–60 minute evaluation remain pending.
+
 ## 0.0.21-rc.1 — 2026-09-20
 
 - Added a bilingual, state-aware first-run guide with natural compact Chinese copy and full English switching across the core workflow.

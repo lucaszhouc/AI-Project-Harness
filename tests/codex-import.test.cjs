@@ -210,9 +210,10 @@ test("import-mode run monitor exposes a validated candidate without treating it 
   const monitor = createAgentRunMonitor({ state, projectId: project.id, taskId: task.id, importMode: true, onImportCandidate: async (value) => candidates.push(value) });
   const value = payload("C:\\work\\demo");
   const output = "```harness-import\n" + JSON.stringify(value) + "\n```";
-  await monitor.handleNotification({ method: "turn/updated", params: { threadId: "t", turnId: "r", message: { text: output } } });
+  await monitor.handleNotification({ method: "item/completed", params: { threadId: "t", turnId: "r", item: { type: "agentMessage", text: output } } });
+  assert.equal(candidates.length, 0, "candidate must wait for terminal success");
+  await monitor.handleNotification({ method: "turn/completed", params: { threadId: "t", turnId: "r", turn: { status: "completed" } } });
   assert.equal(candidates.length, 1);
-  assert.equal(task.status, "in_progress");
   assert.equal(task.candidate, undefined);
 });
 
@@ -228,7 +229,8 @@ test("one large final Agent message is not truncated at the ordinary 12KiB text 
   value.tasks = Array.from({ length: 80 }, (_, index) => ({ id: `task-${index}`, title: `任务 ${index} ${"x".repeat(220)}`, status: "backlog", criteria: [] }));
   const output = "```harness-import\n" + JSON.stringify(value) + "\n```";
   assert.ok(output.length > 12_000);
-  await monitor.handleNotification({ method: "turn/updated", params: { message: { text: output } } });
+  await monitor.handleNotification({ method: "item/completed", params: { item: { type: "agentMessage", text: output } } });
+  await monitor.handleNotification({ method: "turn/completed", params: { turn: { status: "completed" } } });
   assert.equal(candidates[0].tasks.length, 80);
 });
 
@@ -255,8 +257,8 @@ test("import monitor keeps a 1MiB bounded candidate buffer while normal tasks st
   const imported = createAgentRunMonitor({ state, projectId: project.id, taskId: importTask.id, importMode: true });
   const text = "x".repeat(12_000);
   for (let index = 0; index < 5; index += 1) {
-    await ordinary.handleNotification({ method: "turn/updated", params: { message: { text } } });
-    await imported.handleNotification({ method: "turn/updated", params: { message: { text } } });
+    await ordinary.handleNotification({ method: "item/completed", params: { item: { type: "agentMessage", text } } });
+    await imported.handleNotification({ method: "item/completed", params: { item: { type: "agentMessage", text } } });
   }
   assert.equal(IMPORT_OUTPUT_MAX_CHARS, 1024 * 1024);
   assert.equal(ordinary.getOutput().length, ORDINARY_OUTPUT_MAX_CHARS);

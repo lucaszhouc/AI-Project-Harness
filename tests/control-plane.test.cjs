@@ -21,7 +21,7 @@ test("new projects always receive CTO and Review control sessions", () => {
 test("automatic Review Agent accepts a valid agent result and advances HEAD", () => {
   const state = machine.createInitialState("C:\\fixture");
   const project = state.projects[0];
-  const task = machine.createTask(state, project.id, { title: "自动审核" });
+  const task = machine.createTask(state, project.id, { title: "自动审核", criteria: "可验证" });
   machine.dispatchTask(state, project.id, task.id);
   machine.submitTaskResult(state, project.id, task.id, {
     source: "agent-auto",

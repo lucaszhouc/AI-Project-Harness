@@ -65,7 +65,7 @@ test("warm session rotates after its bounded accepted-task budget", () => {
   assert.notEqual(accepted[0].sessionId, accepted.at(-1).sessionId);
 });
 
-test("reused warm session receives a bounded DELTA packet after its first accepted task", () => {
+test("reused logical session still gives a fresh provider thread a bounded FULL packet", () => {
   const state = machine.createInitialState("C:\\work\\delta");
   const project = state.projects[0];
   project.tasks = [];
@@ -76,7 +76,8 @@ test("reused warm session receives a bounded DELTA packet after its first accept
   const second = machine.createTask(state, project.id, { title: "第二项", workstream: "delta" });
   const secondRun = machine.dispatchTask(state, project.id, second.id);
   assert.equal(secondRun.session.id, firstRun.session.id);
-  assert.match(secondRun.missionPacket, /DELTA PACKET/);
+  assert.match(secondRun.missionPacket, /FULL PACKET/);
+  assert.doesNotMatch(secondRun.missionPacket, /DELTA PACKET/);
 });
 
 test("task dependencies block dispatch until prerequisite is accepted", () => {

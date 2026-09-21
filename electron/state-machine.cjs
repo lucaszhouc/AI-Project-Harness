@@ -311,6 +311,15 @@ function setProjectStatus(state, projectId, status) {
 function updateProjectContract(state, projectId, input = {}) {
   const project = getProject(state, projectId);
   ensureObjectives(project);
+  project.contractRevision ||= 1;
+  const previousContract = JSON.stringify({
+    path: project.path,
+    goal: project.goal,
+    objective: project.objective?.title,
+    techStack: project.techStack || [],
+    constraints: project.constraints || [],
+    blockers: project.blockers || [],
+  });
   const timestamp = now();
   if (input.path !== undefined || input.projectPath !== undefined) {
     const requestedPath = String(input.path ?? input.projectPath ?? "").trim();
@@ -338,6 +347,15 @@ function updateProjectContract(state, projectId, input = {}) {
   if (input.techStack !== undefined) project.techStack = normalizeLines(input.techStack);
   if (input.constraints !== undefined) project.constraints = normalizeLines(input.constraints);
   if (input.blockers !== undefined) project.blockers = normalizeLines(input.blockers);
+  const nextContract = JSON.stringify({
+    path: project.path,
+    goal: project.goal,
+    objective: project.objective?.title,
+    techStack: project.techStack || [],
+    constraints: project.constraints || [],
+    blockers: project.blockers || [],
+  });
+  if (nextContract !== previousContract) project.contractRevision += 1;
   project.events.unshift({ id: randomUUID(), type: "project.contract.updated", at: timestamp, detail: "项目目标与约束已更新" });
   project.updatedAt = timestamp;
   return project;
@@ -427,6 +445,7 @@ function createSelfHostedProject(projectPath) {
     path: projectPath,
     status: "active",
     revision: 1,
+    contractRevision: 1,
     goal: "让项目状态独立于 Agent 会话，并通过审核推进 Project HEAD。",
     source: { kind: "ai-project-harness", label: "由 AI Project Harness 自举接入" },
     techStack: [],
@@ -451,11 +470,13 @@ function createSelfHostedProject(projectPath) {
         sessionPolicy: "warm",
         status: "review",
         baseRevision: 1,
+        contractRevision: 1,
         createdAt,
         run: {
           id: "run-self-hosted-mvp",
           sessionId,
           baseRevision: 1,
+          contractRevision: 1,
           startedAt: createdAt,
           submittedAt: createdAt,
         },
@@ -568,6 +589,7 @@ function addProject(state, projectPath) {
     path: normalized,
     status: "active",
     revision: 1,
+    contractRevision: 1,
     goal: "尚未填写项目目标。",
     source: { kind: "ai-project-harness", label: "由 AI Project Harness 接入" },
     techStack: [],
@@ -608,6 +630,7 @@ function createBlankProject(state, input = {}) {
     path: suppliedPath ? path.resolve(suppliedPath) : "",
     status: "active",
     revision: 1,
+    contractRevision: 1,
     goal: String(input.goal || "尚未填写项目目标。").trim().slice(0, 4000) || "尚未填写项目目标。",
     source: { kind: "blank", label: "手动新建的空白项目" },
     techStack: Array.isArray(input.techStack) ? input.techStack.map(String).map((item) => item.trim()).filter(Boolean).slice(0, 40) : [],
@@ -814,7 +837,9 @@ function acceptCodexImportCandidate(state, projectId, taskId) {
   if (Number.isInteger(sourceRevision) && sourceRevision > project.revision) project.revision = sourceRevision;
   if (task.run) {
     task.run.baseRevision = project.revision;
+    task.run.contractRevision = Number(project.contractRevision || 1);
     task.baseRevision = project.revision;
+    task.contractRevision = Number(project.contractRevision || 1);
   }
   const checkpoint = acceptTaskResult(state, projectId, taskId);
   const timestamp = now();
@@ -905,6 +930,7 @@ function createTask(state, projectId, input) {
     dependsOn: Array.isArray(input.dependsOn) ? input.dependsOn.map(String).filter(Boolean).slice(0, 20) : String(input.dependsOn || "").split(/[\s,]+/).filter(Boolean).slice(0, 20),
     status: "ready",
     baseRevision: project.revision,
+    contractRevision: Number(project.contractRevision || 1),
     createdAt: timestamp,
   };
   if (task.sectionId) {
@@ -1230,6 +1256,7 @@ function dispatchTask(state, projectId, taskId) {
     id: randomUUID(),
     sessionId: session.id,
     baseRevision: project.revision,
+    contractRevision: Number(project.contractRevision || 1),
     startedAt: now(),
     status: "starting",
     phase: "queued",
@@ -1329,15 +1356,17 @@ function createConversationSession(state, projectId, input = {}) {
 function buildMissionPacket(project, task, session) {
   const accepted = project.checkpoints[0];
   const section = getSection(project, task.sectionId);
-  const packetType = session.cursor < project.revision || Number(session.acceptedTaskCount || 0) > 0 ? "DELTA" : "BOOTSTRAP";
-  const delta = packetType === "DELTA"
-    ? project.checkpoints.filter((item) => Number(item.revision) > Number(session.cursor)).slice(0, 6)
-    : [];
+  // launchHarnessTask creates a fresh provider thread. A logical warm Section
+  // is useful for routing, but it is not proof that the provider has prior
+  // context, so every new task gets a self-contained FULL packet.
+  const recentCheckpoints = project.checkpoints.slice(0, 6);
   const packet = [
-    `# AI Project Harness · ${packetType} PACKET`,
+    "# AI Project Harness · FULL PACKET",
     `PROJECT: ${project.name}`,
     `PROJECT_REVISION: R${project.revision}`,
+    `CONTRACT_REVISION: C${Number(project.contractRevision || 1)}`,
     `SESSION_CURSOR: R${session.cursor}`,
+    `PROJECT_GOAL: ${project.goal || "尚未填写项目目标。"}`,
     `OBJECTIVE: ${project.objective.title}`,
     `PROJECT_STATUS: ${project.status || "active"}`,
     `TASK: ${task.title}`,
@@ -1349,7 +1378,8 @@ function buildMissionPacket(project, task, session) {
     "ACCEPTANCE:",
     ...(task.criteria.length ? task.criteria.map((item, index) => `${index + 1}. ${item}`) : ["1. Complete the task and provide verifiable evidence."]),
     `LATEST_ACCEPTED_CHECKPOINT: ${accepted ? accepted.summary : "None"}`,
-    ...(delta.length ? ["DELTA_CHECKPOINTS:", ...delta.map((item) => `- R${item.revision}: ${item.summary}`)] : []),
+    ...(recentCheckpoints.length ? ["RECENT_ACCEPTED_CHECKPOINTS:", ...recentCheckpoints.map((item) => `- R${item.revision}: ${item.summary}`)] : []),
+    project.constraints?.length ? `CONSTRAINTS: ${project.constraints.slice(0, 10).join("; ")}` : "CONSTRAINTS: none recorded",
     project.blockers?.length ? `BLOCKERS: ${project.blockers.slice(0, 5).join("; ")}` : "BLOCKERS: none recorded",
     "RETURN: submit a structured Task Result with summary, acceptance status, evidence, remaining work, and next step.",
   ].join("\n");
@@ -1365,6 +1395,9 @@ function submitTaskResult(state, projectId, taskId, input) {
   project.events ||= [];
   const task = getTask(project, taskId);
   if (!(task.status === "in_progress" || task.status === "awaiting_result") || !task.run) throw new Error("Task is not in progress");
+  if (Number(task.run.contractRevision || 0) !== Number(project.contractRevision || 1)) {
+    throw new Error(`STALE_CONTRACT: run is based on C${task.run.contractRevision || 0}, current contract is C${project.contractRevision || 1}`);
+  }
   const summary = String(input.summary || "").trim().slice(0, 4000);
   if (!summary) throw new Error("Result summary is required");
   const normalizeList = (value) => Array.isArray(value) ? value.map(String).map((item) => item.trim().slice(0, 800)).filter(Boolean).slice(0, 50) : [];
@@ -1411,34 +1444,66 @@ function autoReviewTaskResult(state, projectId, taskId, options = {}) {
   const task = getTask(project, taskId);
   if (task.status !== "review" || !task.candidate || !task.run) throw new Error("No candidate result to review");
   const reviewedAt = now();
+  if (state.recovery?.mode === "safe-recovery" && state.recovery?.status === "unrecoverable") {
+    task.review = {
+      status: "inconclusive",
+      agent: "codex",
+      automatic: false,
+      sessionId: project.controlSessions?.reviewId,
+      reviewedAt,
+      notes: "安全恢复模式禁止产生新的接受记录，请先恢复可信状态。",
+    };
+    return task;
+  }
+  const requiredCriteria = (task.criteria || []).map((item) => String(item).trim()).filter(Boolean);
+  const submittedCriteria = (task.candidate.acceptance || []).map((item) => String(item.criterion || "").trim()).filter(Boolean);
   const failedCriteria = task.candidate.acceptance.filter((item) => String(item.status).toLowerCase() === "fail");
-  const approved = failedCriteria.length === 0;
+  const hasDuplicateCriteria = new Set(submittedCriteria).size !== submittedCriteria.length;
+  const hasExactCriteria = requiredCriteria.length > 0
+    && submittedCriteria.length === requiredCriteria.length
+    && requiredCriteria.every((criterion) => submittedCriteria.includes(criterion));
+  const allRequiredPass = hasExactCriteria
+    && task.candidate.acceptance.every((item) => String(item.status).toLowerCase() === "pass");
+  const hasEvidence = Array.isArray(task.candidate.evidence)
+    && task.candidate.evidence.some((item) => String(item?.value || "").trim());
+  const approved = !hasDuplicateCriteria && allRequiredPass && hasEvidence;
+  const inconclusive = failedCriteria.length === 0 && !approved;
   task.review = {
-    status: approved ? "approved" : "changes_requested",
+    status: approved ? "approved" : inconclusive ? "inconclusive" : "changes_requested",
     agent: "codex",
-    automatic: options.accept !== false,
+    automatic: approved && options.accept !== false,
     sessionId: project.controlSessions?.reviewId,
     reviewedAt,
-    notes: approved ? "Review Agent 已核对结构化结果与证据。" : `有 ${failedCriteria.length} 条验收条件未通过。`,
+    notes: approved
+      ? "Review Agent 已核对完整验收项与非空证据。"
+      : inconclusive
+        ? "自动审核证据不完整：验收项必须与任务契约一一对应、全部通过且至少包含一条证据。"
+        : `有 ${failedCriteria.length} 条验收条件未通过。`,
   };
   const reviewSession = project.sessions.find((session) => session.id === project.controlSessions?.reviewId);
   if (reviewSession) {
     reviewSession.status = "warm";
     reviewSession.lastReviewedAt = reviewedAt;
   }
-  project.events.unshift({ id: randomUUID(), type: approved ? "review.agent.approved" : "review.agent.changes_requested", at: reviewedAt, detail: task.title });
+  project.events.unshift({ id: randomUUID(), type: approved ? "review.agent.approved" : inconclusive ? "review.agent.inconclusive" : "review.agent.changes_requested", at: reviewedAt, detail: task.title });
   project.updatedAt = reviewedAt;
   if (approved && options.accept !== false) return acceptTaskResult(state, projectId, taskId);
-  if (!approved) requestChanges(state, projectId, taskId);
+  if (!approved && !inconclusive) requestChanges(state, projectId, taskId);
   return task;
 }
 
 function acceptTaskResult(state, projectId, taskId) {
+  if (state.recovery?.mode === "safe-recovery" && state.recovery?.status === "unrecoverable") {
+    throw new Error("RECOVERY_MODE: restore a trusted profile before accepting new results");
+  }
   const project = getProject(state, projectId);
   project.checkpoints ||= [];
   project.events ||= [];
   const task = getTask(project, taskId);
   if (task.status !== "review" || !task.candidate || !task.run) throw new Error("No candidate result to accept");
+  if (Number(task.run.contractRevision || 0) !== Number(project.contractRevision || 1)) {
+    throw new Error(`STALE_CONTRACT: run is based on C${task.run.contractRevision || 0}, current contract is C${project.contractRevision || 1}`);
+  }
   if (task.run.baseRevision !== project.revision) {
     throw new Error(`STALE_RESULT: run is based on R${task.run.baseRevision}, current HEAD is R${project.revision}`);
   }

@@ -65,7 +65,11 @@ const result = {
   completed: ["app-server 启动", "harness-result 回写", "Review Agent 自动审核"],
   remaining: [],
   nextStep: "继续执行发布门禁。",
-  acceptance: [{ criterion: "自动链路可验证", status: "pass" }],
+  acceptance: [
+    { criterion: "自动回写", status: "pass" },
+    { criterion: "自动审核", status: "pass" },
+    { criterion: "Project HEAD 推进", status: "pass" },
+  ],
   evidence: [{ type: "smoke", value: "smoke:auto-review" }],
 };
 const importResult = {
@@ -243,7 +247,11 @@ try {
       completed: ["structured result submitted", "automatic review executed"],
       remaining: [],
       nextStep: "Continue release verification",
-      acceptance: [{ criterion: "automatic path is verifiable", status: "pass" }],
+      acceptance: [
+        { criterion: "自动回写", status: "pass" },
+        { criterion: "自动审核", status: "pass" },
+        { criterion: "Project HEAD 推进", status: "pass" },
+      ],
       evidence: [{ type: "ci-smoke", value: "GitHub Actions Windows runner" }],
       source: "agent-auto",
     }), { projectId: startingProject.id, taskId: startingTask.id });
@@ -289,8 +297,13 @@ try {
   // dedicated MODE:IMPORT turn, review gate, atomic accept, control-session
   // hydration and source-rollout archive.
   if (!hostedCi) {
-  await page.getByRole("button", { name: "添加项目", exact: true }).evaluate((button) => button.click());
   const importDialog = page.locator("#project-dialog");
+  for (let attempt = 0; attempt < 3 && !(await importDialog.isVisible()); attempt += 1) {
+    const addProject = page.getByRole("button", { name: "添加项目", exact: true });
+    await addProject.waitFor({ state: "visible", timeout: 3000 });
+    await addProject.evaluate((button) => button.click());
+    if (!(await importDialog.isVisible())) await page.waitForTimeout(250);
+  }
   await importDialog.waitFor({ state: "visible", timeout: 3000 });
   await importDialog.locator('[data-action="select-project-mode"][data-mode="import"]').click();
   const importName = importDialog.locator('input[name="importName"]');

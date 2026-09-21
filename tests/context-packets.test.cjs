@@ -65,17 +65,17 @@ test("store writes CTO and Review packet files atomically beside durable state",
   }
 });
 
-test("store migrates legacy review candidates through the automatic Review Agent", () => {
+test("store preserves legacy review candidates as unverified for human review", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "aph-legacy-review-"));
   try {
     const store = new HarnessStore(path.join(root, "harness-state.json"), root, { contextRoot: root });
     const project = store.state.projects[0];
-    const task = project.tasks.find((item) => item.status === "accepted");
-    assert.ok(task, "legacy bootstrap candidate was not auto-reviewed");
+    const task = project.tasks.find((item) => item.status === "review" && item.candidate);
+    assert.ok(task, "legacy bootstrap candidate was not preserved");
     assert.equal(task.review?.agent, "codex");
-    assert.equal(task.review?.status, "approved");
-    assert.equal(project.revision, 2);
-    assert.equal(project.tasks.some((item) => item.status === "review" && item.candidate), false);
+    assert.equal(task.review?.status, "legacy_unverified");
+    assert.equal(task.review?.automatic, false);
+    assert.equal(project.revision, 1);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

@@ -1,6 +1,6 @@
 {
   "name": "ai-project-harness",
-  "version": "0.0.21-rc.1",
+  "version": "0.0.22",
   "private": false,
   "license": "MIT",
   "description": "Local-first AI project continuity harness desktop MVP",

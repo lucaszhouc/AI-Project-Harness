@@ -2,7 +2,7 @@
 
 > Local-first project continuity for coding agents on Windows.
 
-[![Release](https://img.shields.io/github/v/release/lucaszhouc/AI-Project-Harness?include_prereleases)](https://github.com/lucaszhouc/AI-Project-Harness/releases/tag/v0.0.21-rc.1) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE) [![Platform](https://img.shields.io/badge/platform-Windows%20x64-0078D4)](https://github.com/lucaszhouc/AI-Project-Harness/releases/tag/v0.0.21-rc.1) [![Electron](https://img.shields.io/badge/Electron-41-47848F)](https://www.electronjs.org/)
+[![Release](https://img.shields.io/github/v/release/lucaszhouc/AI-Project-Harness)](https://github.com/lucaszhouc/AI-Project-Harness/releases/latest) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE) [![Platform](https://img.shields.io/badge/platform-Windows%20x64-0078D4)](https://github.com/lucaszhouc/AI-Project-Harness/releases/latest) [![Electron](https://img.shields.io/badge/Electron-41-47848F)](https://www.electronjs.org/)
 
 **Git versions the code. Harness versions the intent.**
 
@@ -21,7 +21,7 @@ AI Project Harness keeps project goals, tasks, decisions, reviews, checkpoints, 
 
 ## Supported release path
 
-The supported artifact is the Windows x64 portable EXE attached to the exact [`v0.0.21-rc.1` pre-release](https://github.com/lucaszhouc/AI-Project-Harness/releases/tag/v0.0.21-rc.1). Compare its byte size and SHA-256 with the attached manifest; do not use `/releases/latest` for pre-release evaluation.
+Download the Windows x64 portable EXE from the single [latest release](https://github.com/lucaszhouc/AI-Project-Harness/releases/latest). Compare its byte size and SHA-256 with the attached manifest. The repository keeps one supported public release so a new user never has to choose between builds.
 
 Running the packaged EXE does not require the source tree or a development toolchain. The current Codex adapter requires a compatible Codex CLI for connection, import, and task execution. Local project creation and task drafting remain available without Codex. See [Connect Codex](docs/guide/connect-codex.en.md).
 
@@ -67,8 +67,8 @@ Harness does not ask for or store OAuth codes, passwords, cookies, or tokens. Pu
 ## Release status
 
 <!-- APH_AUTO_STATUS_START -->
-- Package version: v0.0.21-rc.1
-- Release status: public GitHub pre-release candidate.
+- Package version: v0.0.22
+- Release status: current public GitHub release.
 - Project names and host state are intentionally excluded.
 <!-- APH_AUTO_STATUS_END -->
 
