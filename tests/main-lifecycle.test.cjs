@@ -3,7 +3,8 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 
-const source = fs.readFileSync(path.join(__dirname, "..", "electron", "main.cjs"), "utf8");
+// Windows Git checkouts may use CRLF; source-boundary checks use LF consistently.
+const source = fs.readFileSync(path.join(__dirname, "..", "electron", "main.cjs"), "utf8").replace(/\r\n/g, "\n");
 
 test("main process keeps a guarded Desktop refresh heartbeat", () => {
   assert.match(source, /runtimeRefreshTimer/);
