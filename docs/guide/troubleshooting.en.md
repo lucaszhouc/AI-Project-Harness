@@ -1,16 +1,18 @@
+> Historical material. Desktop-native repair is incomplete; see [current status](../CURRENT_REPAIR_STATUS.md). Older execution and PASS claims do not describe this source revision.
+
 # Troubleshooting
 
-## Codex was not found
+## Codex Desktop is unavailable
 
-Local project creation still works. Follow the official Codex CLI install guide, then use **Check again**. Harness does not install software or change system settings.
+Start Codex Desktop and retry the native project registration. Harness does not install software, search for a CLI, or change system settings.
 
-## Installed but not authenticated
+## Desktop is not signed in
 
-Complete `codex login` outside Harness and recheck. Do not paste credentials into Harness. A user statement alone never changes the probe to `ok`.
+Complete sign-in in Codex Desktop itself and retry. Do not paste credentials into Harness.
 
-## Check failed
+## Native Desktop check failed
 
-`error` means the check failed; it is not `missing`. Keep the error code, version, action, and timestamp. Recheck once after fixing the external condition.
+`DESKTOP_NATIVE_UNAVAILABLE` means the running Desktop instance did not expose the requested native operation. Keep the error code, Desktop version, action, and timestamp. Retry only after the Desktop state changes.
 
 ## Connection result is unknown
 

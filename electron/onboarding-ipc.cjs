@@ -41,7 +41,7 @@ function createOnboardingIpcHandler({ onboardProject, errorLog }) {
         return {
           ...result,
           desktopProjectWarning: result.desktopProjectWarning
-            || "连接已经完成。请彻底退出 Codex Desktop 后重新打开，确认项目是否出现在侧栏。",
+            || "连接已经完成。请在现有 Codex Desktop 窗口刷新或手动核对侧栏。",
         };
       }
       return result;

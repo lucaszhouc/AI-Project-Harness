@@ -87,3 +87,15 @@ test("process error hooks do not recursively crash when the log cannot be writte
   assert.doesNotThrow(() => processRef.emit("uncaughtExceptionMonitor", new Error("main exploded"), "uncaughtException"));
   assert.doesNotThrow(() => processRef.emit("unhandledRejection", { circular: true }));
 });
+
+test("diagnostics swallows Electron reply EPIPE without swallowing other uncaught errors", () => {
+  const processRef = new EventEmitter();
+  const records = [];
+  installProcessErrorLogging({
+    processRef,
+    errorLog: { capture: (error, details) => records.push({ error, details }) },
+  });
+
+  assert.doesNotThrow(() => processRef.emit("uncaughtException", Object.assign(new Error("EPIPE: broken pipe, write"), { code: "EPIPE" })));
+  assert.equal(records.length, 0);
+});

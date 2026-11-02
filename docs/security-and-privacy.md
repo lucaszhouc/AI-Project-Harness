@@ -1,12 +1,12 @@
 # Security and privacy model
 
-AI Project Harness is local-first. Project state, guide state, logs, and archives stay under the selected local user-data root unless a user explicitly invokes an external Agent operation.
+AI Project Harness is local-first. Project state, operation receipts, logs, and archives stay under the selected local user-data root unless a user explicitly invokes an external Agent operation.
 
-## Default local guide
+## Default local state
 
 - Works without an API key, model call, or network request.
 - Read-only capability probes create zero Agent turns and zero Codex Projects.
-- Does not request or store OAuth codes, passwords, cookies, or tokens.
+- Does not request Codex account OAuth codes, passwords, or cookies. The local control endpoint stores a generated authentication token; exclude its file from all public exports.
 - Has no question/chat input and makes no model call.
 - Does not index complete prompts, transcript bodies, host project names, or private paths.
 

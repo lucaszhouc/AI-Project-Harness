@@ -7,7 +7,11 @@ export function userFacingErrorDetails(error) {
   message = message.replace(REMOTE_METHOD_PREFIX, "").replace(/^Error:\s*/i, "").trim();
   message = message.replace(ERROR_ID_PATTERN, "").trim();
 
-  if (/\bspawn\s+EINVAL\b/i.test(message)) {
+  if (/DESKTOP_NATIVE_UNAVAILABLE/i.test(message)) {
+    message = "无法启动 Codex。请确认 Codex Desktop 已安装并可正常打开。";
+  } else if (/DESKTOP_NATIVE_BLOCKED|desktop-native-only-blocked/i.test(message)) {
+    message = "Codex Desktop 原生接口不可用。请在 Desktop 中重试；若仍失败，请打开错误日志。";
+  } else if (/\bspawn\s+EINVAL\b/i.test(message)) {
     message = "Codex 启动入口不兼容。请更新 Harness 后重试；若仍失败，请打开错误日志。";
   } else if (/\bspawn\b[\s\S]*\bENOENT\b/i.test(message)) {
     message = "无法启动 Codex。请确认 Codex Desktop 已安装并可正常打开。";
@@ -15,10 +19,6 @@ export function userFacingErrorDetails(error) {
     message = "无法连接 Codex 服务。请确认 Codex Desktop 正常运行后重试。";
   } else if (/^initialize timed out\b/i.test(message)) {
     message = "Codex 连接超时（初始化阶段）。请确认 Codex Desktop 正常运行后重试。";
-  } else if (/Codex app-server is not writable/i.test(message)) {
-    message = "Codex 连接已中断。请重新打开 Codex Desktop 后重试。";
-  } else if (/Codex app-server exited/i.test(message)) {
-    message = "Codex 后台服务意外退出。请重新打开 Codex Desktop 后重试。";
   } else if (/STALE_RESULT/i.test(message)) {
     message = "这个结果基于旧的项目版本，已安全拦截；请重新读取项目上下文后再提交。";
   } else if (/已归档项目|项目当前为/i.test(message)) {

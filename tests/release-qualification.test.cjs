@@ -42,7 +42,7 @@ test("ordinary candidate and Review remain behind explicit human Accept", () => 
   assert.throws(() => machine.acceptTaskResult(state, project.id, task.id), /No candidate result to accept/);
 });
 
-test("explicit auto-review advances once after terminal completion", async () => {
+test("automatic formal checks require explicit acceptance even after terminal completion", async () => {
   const { state, project, task } = fixture("Auto review", { reviewMode: "auto", criteria: "release contract" });
   machine.dispatchTask(state, project.id, task.id);
   machine.attachExternalThread(state, project.id, task.id, { threadId: "auto-thread", turnId: "auto-turn" });
@@ -58,6 +58,11 @@ test("explicit auto-review advances once after terminal completion", async () =>
   assert.equal(project.revision, 1);
   assert.equal(task.status, "in_progress");
   await monitor.handleNotification({ method: "turn/completed", params: { threadId: "auto-thread", turnId: "auto-turn", turn: { status: "completed" } } });
+  assert.equal(project.revision, 1);
+  assert.equal(task.status, "review");
+  assert.equal(task.review.agent, "rule-checker");
+  assert.equal(task.review.automatic, false);
+  machine.acceptTaskResult(state, project.id, task.id);
   assert.equal(project.revision, 2);
   assert.equal(task.status, "accepted");
 });
@@ -87,7 +92,7 @@ test("Stop is the product cancel transaction and never advances HEAD", () => {
 for (const [name, message, status] of [
   ["authentication failure", "401 authentication failed", "failed"],
   ["timeout", "turn/start timed out after 30000ms", "failed"],
-  ["process crash", "Codex app-server exited (1)", "failed"],
+  ["process crash", "DESKTOP_NATIVE_UNAVAILABLE", "failed"],
   ["interrupted", "turn interrupted by user", "cancelled"],
 ]) {
   test(`Codex ${name} becomes a durable retryable failure`, async () => {

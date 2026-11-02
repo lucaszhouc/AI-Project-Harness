@@ -1,3 +1,5 @@
+> Historical material. Desktop-native repair is incomplete; see [current status](../CURRENT_REPAIR_STATUS.md). Older execution and PASS claims do not describe this source revision.
+
 # Your first task
 
 1. Select **New task**.

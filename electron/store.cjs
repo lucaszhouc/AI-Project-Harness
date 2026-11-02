@@ -92,6 +92,9 @@ class HarnessStore {
         project.checkpoints ||= [];
         project.decisions ||= [];
         project.events ||= [];
+        if (!Array.isArray(project.knowledgeCandidates)) { project.knowledgeCandidates = []; migrated = true; }
+        if (!Array.isArray(project.ruleCards)) { project.ruleCards = []; migrated = true; }
+        if (!Array.isArray(project.playbooks)) { project.playbooks = []; migrated = true; }
         project.objective ||= { id: require("node:crypto").randomUUID(), title: "建立第一个可验收任务", status: "active" };
         const before = JSON.stringify(project.controlSessions || null);
         machine.ensureProjectControlSessions(project);
@@ -142,6 +145,16 @@ class HarnessStore {
           if (!session.role) {
             session.role = session.id === project.controlSessions?.ctoId ? "cto"
               : session.id === project.controlSessions?.reviewId ? "review" : "task";
+            migrated = true;
+          }
+          if (["cto", "review"].includes(session.role) && session.externalThreadStatus === "ready") {
+            // Old adapters promoted a deep-link request or supplied id to ready.
+            // Preserve the identity, but do not fabricate live Desktop evidence.
+            session.externalThreadStatus = session.externalThreadId ? "bound" : "pending";
+            if (!session.externalThreadId) {
+              session.lastOpenRequestedAt ||= session.lastOpenedAt;
+              delete session.lastOpenedAt;
+            }
             migrated = true;
           }
         }
@@ -201,7 +214,7 @@ class HarnessStore {
     Object.assign(this.state, nextState);
   }
 
-  /** Reload a state written by the standalone CLI/MCP bridge. Atomic rename
+  /** Reload a state written by another Harness Desktop process. Atomic rename
    * means the reader sees either the old or new complete snapshot. */
   reloadExternal(force = false) {
     const mtime = this.readMtime();

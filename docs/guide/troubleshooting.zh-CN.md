@@ -1,16 +1,18 @@
+> Historical material. Desktop-native repair is incomplete; see [current status](../CURRENT_REPAIR_STATUS.md). Older execution and PASS claims do not describe this source revision.
+
 # 故障排查
 
-## 未检测到 Codex
+## Codex Desktop 不可用
 
-别担心，你仍然可以先新建项目和填写任务。按照官方 Codex CLI 安装说明完成安装后，回 Harness 点“再检查一下”。Harness 不会自动安装软件，也不会修改系统设置。
+先在 Codex Desktop 自己的界面中启动，再重试原生项目注册。Harness 不安装软件、不搜索 CLI，也不修改系统设置。
 
-## 已安装但未登录
+## Desktop 尚未登录
 
-在终端运行 `codex login`，按官方流程登录，然后回 Harness 再检查一次。不要把密码、验证码或 token 粘贴到 Harness。
+在 Codex Desktop 自己的界面中完成登录，再重试。不要把密码、验证码或 token 粘贴到 Harness。
 
-## 检查报错
+## Desktop 原生检查报错
 
-检查失败不一定代表软件没安装。先记下错误编号和发生时间，处理完外部问题后再检查一次。
+`DESKTOP_NATIVE_UNAVAILABLE` 表示当前 Desktop 没有提供所需原生操作。记下错误编号、Desktop 版本、操作和时间；只有 Desktop 状态变化后再重试。
 
 ## 连接结果未知
 

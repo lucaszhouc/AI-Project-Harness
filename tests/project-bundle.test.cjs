@@ -20,3 +20,13 @@ test("project bundle exports state without transcript bytes and imports idempote
   assert.equal(destination.projects.length, 1);
   fs.rmSync(root, { recursive: true, force: true });
 });
+
+test("blank project bundle can be restored without a workspace path", () => {
+  const source = sm.createEmptyState();
+  const project = sm.createBlankProject(source, { name: "可恢复空白项目" });
+  const bundle = buildBundle(project);
+  const destination = { schemaVersion: 1, selectedProjectId: "", projects: [] };
+  const result = importProjectBundle(destination, bundle);
+  assert.equal(result.imported, true);
+  assert.equal(destination.projects[0].name, "可恢复空白项目");
+});

@@ -13,9 +13,15 @@ test("project ledger is bounded, detached from repository, and updates determini
   const project = state.projects[0];
   project.goal = "长期目标";
   project.techStack = ["Electron", "TypeScript"];
+  project.ruleCards = [{ id: "rule-1", type: "rule", status: "active", kind: "must", scope: "project", title: "先验证", statement: "交付前必须运行打包后测试。", sources: [] }];
+  project.playbooks = [{ id: "playbook-1", type: "playbook", status: "active", version: 2, scope: "project", title: "桌面交付", trigger: "完成桌面功能更新", purpose: "交付可运行程序", steps: [{ order: 1, action: "重新打包", validation: "portable smoke PASS", sources: [] }] }];
   createSection(state, project.id, { name: "前端", kind: "reusable" });
   createTask(state, project.id, { title: "首项任务" });
-  assert.match(buildProjectLedger(project), /动态项目白皮书/);
+  const ledger = buildProjectLedger(project);
+  assert.match(ledger, /动态项目白皮书/);
+  assert.match(ledger, /用户确认的规则与 Playbook/);
+  assert.match(ledger, /交付前必须运行打包后测试/);
+  assert.match(ledger, /桌面交付 v2/);
   assert.equal(persistProjectLedger(state, root), true);
   const first = project.ledger;
   assert.ok(fs.existsSync(first.path));

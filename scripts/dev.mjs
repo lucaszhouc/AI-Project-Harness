@@ -1,11 +1,8 @@
 import { spawn } from "node:child_process";
-import { createRequire } from "node:module";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 
-const require = createRequire(import.meta.url);
-const { resolveCommandInvocation } = require("../electron/command-runtime.cjs");
 const projectRoot = path.resolve(fileURLToPath(new URL("../", import.meta.url)));
 const viteBin = path.join(projectRoot, "node_modules", "vite", "bin", "vite.js");
 const electronCommand = path.join(
@@ -17,11 +14,9 @@ const electronCommand = path.join(
 );
 
 function launch(executable, args, options = {}) {
-  const invocation = resolveCommandInvocation(executable, args, { environment: options.env || process.env });
-  return spawn(invocation.executable, invocation.args, {
+  return spawn(executable, args, {
     ...options,
-    env: invocation.env,
-    windowsVerbatimArguments: invocation.windowsVerbatimArguments,
+    env: options.env || process.env,
   });
 }
 

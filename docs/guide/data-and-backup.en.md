@@ -1,3 +1,5 @@
+> Historical material. Desktop-native repair is incomplete; see [current status](../CURRENT_REPAIR_STATUS.md). Older execution and PASS claims do not describe this source revision.
+
 # Data and backup
 
 Harness stores local project state, a replay journal, bounded guide state, error logs, content-addressed archives, and derived ledgers under its user-data root. `APH_USER_DATA` isolates automated tests; tests must never use a real user profile.

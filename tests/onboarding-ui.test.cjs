@@ -1,7 +1,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 
-test("project onboarding status renders a real stage and determinate progress", async () => {
+test("project onboarding renders an observed stage without an invented percentage", async () => {
   const { progressOnboardingState, renderOnboardingStatus } = await import("../src/onboarding-ui.mjs");
   const state = progressOnboardingState({
     stage: "checking_git",
@@ -11,9 +11,9 @@ test("project onboarding status renders a real stage and determinate progress", 
   });
   const html = renderOnboardingStatus(state);
 
-  assert.match(html, /role="progressbar"/);
-  assert.match(html, /aria-valuenow="46"/);
-  assert.match(html, /width:46%/);
+  assert.equal(state.progress, undefined);
+  assert.doesNotMatch(html, /aria-valuenow|width:46%|46%/);
+  assert.match(html, /总量未知/);
   assert.match(html, /正在检查 Git 仓库/);
   assert.match(html, /Local &lt;Chat&gt;/);
 });
@@ -52,18 +52,18 @@ test("desktop-open partial failure renders a persistent warning instead of false
   assert.doesNotMatch(html, /Codex 已启动并注入上下文/);
 });
 
-test("official Project creation explains that the Desktop sidebar needs a cold reload", async () => {
+test("official Project creation explains that the Desktop sidebar needs live verification", async () => {
   const module = await import("../src/onboarding-ui.mjs");
   const state = module.completedOnboardingState({
     desktopOpened: true,
     desktopProjectRestartRequired: true,
-    desktopProjectWarning: "连接已经完成。请彻底退出 Codex Desktop 后重新打开，确认项目是否出现在侧栏。",
+    desktopProjectWarning: "连接已经完成。请在现有 Codex Desktop 窗口刷新或手动核对侧栏。",
   });
   const html = module.renderOnboardingStatus(state);
 
   assert.equal(state.status, "notice");
   assert.match(html, /侧栏/);
-  assert.match(html, /彻底退出 Codex Desktop/);
+  assert.match(html, /现有 Codex Desktop 窗口刷新|手动核对侧栏/);
   assert.match(html, /role="status"/);
   assert.doesNotMatch(html, /打开错误日志/);
   assert.doesNotMatch(html, /Codex 已启动并注入上下文/);

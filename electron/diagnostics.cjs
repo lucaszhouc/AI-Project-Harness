@@ -33,6 +33,17 @@ function installProcessErrorLogging({ processRef = process, errorLog }) {
   processRef.on("unhandledRejection", (reason) => {
     captureWithoutThrowing(reason, { operation: "main-process", stage: "unhandledRejection" });
   });
+  // Electron can report a renderer IPC reply through a pipe that has just
+  // disconnected (for example, a CDP/renderer test closes while an async IPC
+  // handler is returning). Node surfaces that write as an uncaught EPIPE from
+  // Electron's internal `replyWithError`; allowing it to escape terminates the
+  // Harness process and hides the original operation failure. The error is
+  // already captured by `uncaughtExceptionMonitor`; swallow only this exact
+  // broken-pipe boundary and preserve normal uncaught-exception behavior.
+  processRef.on("uncaughtException", (error) => {
+    if (String(error?.code || "") === "EPIPE" || /EPIPE: broken pipe/i.test(String(error?.message || error))) return;
+    throw error;
+  });
 }
 
 module.exports = { createDiagnostics, installProcessErrorLogging };

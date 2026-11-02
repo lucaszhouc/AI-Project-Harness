@@ -18,6 +18,10 @@ test("project health reports detached ledger and context readiness", () => {
   assert.equal(health.checks.github, "none");
   assert.equal(health.checks.codexProject, "none");
   project.codexProjectId = "official-project";
+  project.codexProjectSync = { state: "desktop-restart-required", checkedAt: "2026-09-04T09:59:00.000Z" };
+  const appServerOnly = projectHealth(project, { git: { available: true }, github: { remote: null } });
+  assert.equal(appServerOnly.checks.codexProject, false);
+  assert.ok(appServerOnly.failures.includes("codexProject"));
   project.codexProjectSync = { state: "desktop-restart-required", checkedAt: "2026-09-04T10:00:00.000Z" };
   const pending = projectHealth(project, { git: { available: true }, github: { remote: null } });
   assert.equal(pending.checks.codexProject, false);

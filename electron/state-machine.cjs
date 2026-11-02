@@ -3,8 +3,8 @@ const path = require("node:path");
 
 const now = () => new Date().toISOString();
 const HISTORY_LIMITS = { events: 1000, checkpoints: 1000, decisions: 500, objectives: 100, sessions: 500 };
-const CODEX_PROJECT_SYNC_STATES = ["not-created", "app-server-confirmed", "desktop-registered", "desktop-restart-required"];
-const CODEX_PROJECT_RESTART_DETAIL = "官方 Project 已写入；Codex Desktop 不会热加载外部 Project，需完全退出后重新打开再核对侧栏。";
+const CODEX_PROJECT_SYNC_STATES = ["not-created", "desktop-registered", "desktop-restart-required"];
+const CODEX_PROJECT_RESTART_DETAIL = "官方 Project 已写入；当前运行中的 Codex Desktop 尚未提供实时侧栏核对结果，请在现有窗口刷新或手动核对。";
 
 function normalizedImportPath(value) {
   return path.resolve(String(value || ""))
@@ -257,11 +257,66 @@ function archiveSection(state, projectId, sectionRef, reason = "用户归档") {
   return section;
 }
 
-function archiveProject(state, projectId, reason = "用户归档") {
+function activeLeaseTask(task) {
+  if (!task?.run || !["in_progress", "awaiting_result"].includes(task.status)) return false;
+  const status = String(task.run.status || "").toLowerCase();
+  if (!["starting", "running"].includes(status)) return false;
+  // A starting run needs a real turn/process binding. A running run is
+  // already evidence that the provider turn was attached; legacy states can
+  // therefore use startedAt when leaseStartedAt was not persisted yet.
+  return Boolean(task.run.leaseStartedAt || status === "running" || (task.run.externalThreadId && (task.run.externalTurnId || task.run.processId)));
+}
+
+function markTaskTimedOut(project, task, reason = "任务超过 24 小时 lease", at) {
+  if (!task?.run) return false;
+  const timeoutMs = at instanceof Date ? at.getTime() : typeof at === "number" ? at : Date.parse(String(at || ""));
+  const timeoutAt = Number.isFinite(timeoutMs) ? new Date(timeoutMs).toISOString() : now();
+  const message = String(reason || "任务超过 24 小时 lease").slice(0, 500);
+  task.status = "timed_out";
+  task.run.status = "timed_out";
+  task.run.phase = message.includes("归档") ? "project_archived" : "timed_out";
+  task.run.userActionRequired = false;
+  task.run.progress = undefined;
+  task.run.timeoutAt = timeoutAt;
+  task.run.timeoutReason = message;
+  task.run.error = message;
+  task.run.completedAt = timeoutAt;
+  task.run.lastEventAt = timeoutAt;
+  task.run.lastEvent = message;
+  updateSectionForTask(project, task, "failed");
+  const session = project.sessions?.find((item) => item.id === task.run.sessionId);
+  if (session) session.status = session.type === "disposable" ? "retired" : "warm";
+  project.events ||= [];
+  project.events.unshift({ id: randomUUID(), type: "task.timed_out", at: timeoutAt, detail: `${task.title} · ${message}` });
+  project.updatedAt = timeoutAt;
+  return true;
+}
+
+function expireTaskLeases(state, at = Date.now(), leaseMs = 24 * 60 * 60 * 1000, reason = "任务超过 24 小时 lease") {
+  const currentMs = at instanceof Date ? at.getTime() : typeof at === "number" ? at : Date.parse(String(at));
+  const threshold = Number.isFinite(currentMs) ? currentMs : Date.now();
+  const limit = Math.max(1, Number(leaseMs) || 24 * 60 * 60 * 1000);
+  const expired = [];
+  for (const project of state.projects || []) {
+    for (const task of project.tasks || []) {
+      if (!activeLeaseTask(task)) continue;
+      const startedAt = Date.parse(String(task.run.leaseStartedAt || (String(task.run.status || "").toLowerCase() === "running" ? task.run.startedAt : "")));
+      if (!Number.isFinite(startedAt) || threshold - startedAt < limit) continue;
+      if (markTaskTimedOut(project, task, reason, threshold)) expired.push({ projectId: project.id, taskId: task.id, threadId: task.run.externalThreadId, runId: task.run.id });
+    }
+  }
+  return expired;
+}
+
+function archiveProjectWithTaskStop(state, projectId, reason = "用户归档") {
   const project = getProject(state, projectId);
   project.events ||= [];
-  const active = (project.tasks || []).some((task) => ["in_progress", "awaiting_result", "review"].includes(task.status));
-  if (active) throw new Error("项目仍有进行中的任务，完成或停止后再归档");
+  for (const task of project.tasks || []) {
+    const runStatus = String(task.run?.status || "").toLowerCase();
+    const active = ["in_progress", "awaiting_result"].includes(task.status)
+      || ["starting", "running"].includes(runStatus);
+    if (active && task.run) markTaskTimedOut(project, task, "项目归档时自动停止");
+  }
   const archivedAt = now();
   project.status = "archived";
   project.archive = { archivedAt, reason: String(reason || "用户归档").slice(0, 500) };
@@ -275,9 +330,34 @@ function archiveProject(state, projectId, reason = "用户归档") {
   project.updatedAt = archivedAt;
   if (state.selectedProjectId === project.id) {
     const replacement = state.projects.find((item) => item.id !== project.id && item.status !== "archived");
-    state.selectedProjectId = replacement?.id || project.id;
+    state.selectedProjectId = replacement?.id || "";
   }
   return project;
+}
+
+function archiveProject(state, projectId, reason = "用户归档") {
+  return archiveProjectWithTaskStop(state, projectId, reason);
+}
+
+/**
+ * Remove a project from the active Harness state without touching the user's
+ * workspace, Git repository, Codex Project, or source conversation archives.
+ * The caller persists the returned project in the reversible _eliminated
+ * store before committing this state mutation.
+ */
+function removeProject(state, projectId, reason = "用户从 Harness 移出") {
+  const project = getProject(state, projectId);
+  const active = (project.tasks || []).some((task) => ["in_progress", "awaiting_result", "review"].includes(task.status));
+  if (active) throw new Error("项目仍有进行中的任务，完成或停止后再移出");
+  const removedAt = now();
+  const removed = {
+    ...project,
+    removal: { removedAt, reason: String(reason || "用户从 Harness 移出").slice(0, 500) },
+  };
+  state.projects = state.projects.filter((item) => item.id !== project.id);
+  const replacement = state.projects.find((item) => item.status !== "archived") || state.projects[0];
+  state.selectedProjectId = replacement?.id || "";
+  return removed;
 }
 
 function restoreProject(state, projectId) {
@@ -420,7 +500,7 @@ function projectOverview(project) {
     projectId: project?.id,
     status: project?.status || "active",
     revision: Number(project?.revision || 0),
-    taskCounts: Object.fromEntries(["backlog", "ready", "in_progress", "awaiting_result", "review", "changes_requested", "accepted", "failed"].map((status) => [status, tasks.filter((task) => task.status === status).length])),
+    taskCounts: Object.fromEntries(["backlog", "ready", "in_progress", "awaiting_result", "review", "changes_requested", "accepted", "failed", "timed_out"].map((status) => [status, tasks.filter((task) => task.status === status).length])),
     sectionCounts: Object.fromEntries(["idle", "running", "awaiting_approval", "closed", "archived"].map((status) => [status, (project?.sections || []).filter((section) => section.status === status).length])),
     conversationCount: (project?.sessions || []).filter((session) => ["conversation", "task", "cto", "review"].includes(session.role)).length,
     latestCheckpoint: project?.checkpoints?.[0] || null,
@@ -537,6 +617,9 @@ function createSelfHostedProject(projectPath) {
     objectives: [],
     checkpoints: [],
     decisions: [],
+    knowledgeCandidates: [],
+    ruleCards: [],
+    playbooks: [],
     events: [
       { id: randomUUID(), type: "project.bootstrap", at: createdAt, detail: "Self-hosted MVP project created." },
     ],
@@ -602,6 +685,9 @@ function addProject(state, projectPath) {
     objectives: [],
     checkpoints: [],
     decisions: [],
+    knowledgeCandidates: [],
+    ruleCards: [],
+    playbooks: [],
     events: [{ id: randomUUID(), type: "project.created", at: timestamp, detail: normalized }],
     createdAt: timestamp,
     updatedAt: timestamp,
@@ -643,6 +729,9 @@ function createBlankProject(state, input = {}) {
     objectives: [],
     checkpoints: [],
     decisions: [],
+    knowledgeCandidates: [],
+    ruleCards: [],
+    playbooks: [],
     events: [{ id: randomUUID(), type: "project.created.blank", at: timestamp, detail: name }],
     createdAt: timestamp,
     updatedAt: timestamp,
@@ -659,18 +748,24 @@ function createBlankProject(state, input = {}) {
  * Register a request to hydrate a project from an existing Codex Project.
  * This is intentionally a pure state transition. The caller may later run a
  * Codex Agent to fill the project, but creating the request itself must never
- * start app-server, mutate Codex state, or fabricate imported data.
+ * start Desktop 原生控制面, mutate Codex state, or fabricate imported data.
  */
 function requestCodexProjectImport(state, input = {}) {
   const codexProjectId = String(input.codexProjectId || input.externalProjectId || input.projectId || "").trim();
   if (!codexProjectId) throw new Error("Codex Project id is required");
+  const bindCodexProject = input.bindCodexProject !== false;
+  const sourceKind = input.sourceKind === "thread-selection" ? "thread-selection" : "codex-project";
+  const selectedThreadIds = [...new Set((Array.isArray(input.selectedThreadIds) ? input.selectedThreadIds : [])
+    .map((value) => String(value || "").trim()).filter(Boolean))].slice(0, 100);
   // `targetProjectId`/`harnessProjectId` lets the UI hydrate an existing blank
   // project. A bare `projectId` remains an accepted alias for the external
   // Codex id for callers that only have one identifier.
   const targetProjectId = String(input.targetProjectId || input.harnessProjectId || (input.codexProjectId ? input.projectId : "") || "").trim();
-  const existing = state.projects.find((item) => (targetProjectId && item.id === targetProjectId)
-    || item.codexProjectId === codexProjectId
-    || item.codexImport?.codexProjectId === codexProjectId);
+  const existing = sourceKind === "thread-selection"
+    ? state.projects.find((item) => targetProjectId && item.id === targetProjectId)
+    : state.projects.find((item) => (targetProjectId && item.id === targetProjectId)
+      || item.codexProjectId === codexProjectId
+      || item.codexImport?.codexProjectId === codexProjectId);
   if (existing) {
     const boundCodexProjectId = String(existing.codexImport?.codexProjectId || existing.codexProjectId || "").trim();
     if (boundCodexProjectId && boundCodexProjectId !== codexProjectId) {
@@ -695,15 +790,19 @@ function requestCodexProjectImport(state, input = {}) {
   const project = existing || createBlankProject(state, {
     name,
     path: input.path || input.root || "",
-    goal: "从 Codex Project 回填完整项目状态、任务、会话与证据。",
-    objective: "完成 Codex Project → Harness 的完整回填",
+    goal: input.goal || (sourceKind === "thread-selection" ? "从手动选择的 Codex 对话回填项目状态、任务、决策与证据。" : "从 Codex Project 回填完整项目状态、任务、会话与证据。"),
+    objective: input.objective || (sourceKind === "thread-selection" ? "完成所选 Codex 对话 → Harness 的可信回填" : "完成 Codex Project → Harness 的完整回填"),
   });
-  project.source = { kind: "codex-import", label: "待从 Codex Project 回填" };
-  project.codexProjectId = codexProjectId;
+  project.source = sourceKind === "thread-selection"
+    ? { kind: "codex-import", label: "待从手动选择的 Codex 对话回填" }
+    : { kind: "codex-import", label: "待从 Codex Project 回填" };
+  if (bindCodexProject) project.codexProjectId = codexProjectId;
   project.codexImport = {
     ...(project.codexImport || {}),
     status: "queued",
     codexProjectId,
+    sourceKind,
+    selectedThreadIds,
     requestedAt: now(),
     taskId: undefined,
     startedAt: undefined,
@@ -713,13 +812,15 @@ function requestCodexProjectImport(state, input = {}) {
     candidateAt: undefined,
     candidateHash: undefined,
     threadId: undefined,
-    detail: "等待 Codex Agent 回填任务、CTO、Review、进度、Git 与会话归档。",
+    detail: sourceKind === "thread-selection"
+      ? `等待 Codex Agent 从 ${selectedThreadIds.length} 个已勾选对话回填项目状态。`
+      : "等待 Codex Agent 回填任务、CTO、Review、进度、Git 与会话归档。",
   };
   const task = createTask(state, project.id, {
-    title: `从 Codex Project 导入 ${project.name}`,
+    title: sourceKind === "thread-selection" ? `从 ${selectedThreadIds.length} 个 Codex 对话导入 ${project.name}` : `从 Codex Project 导入 ${project.name}`,
     workstream: "codex-project-import",
     criteria: [
-      "读取 Codex Project 的完整会话与历史摘要",
+      sourceKind === "thread-selection" ? "只读取用户明确勾选的 Codex 对话" : "读取 Codex Project 的完整会话与历史摘要",
       "回填 CTO、Review、任务与未完成事项",
       "核对项目最新进展、Git 状态与 GitHub 证据",
       "为每条回填数据保存来源与时间戳，不覆盖用户已审核内容",
@@ -761,6 +862,8 @@ function recordCodexImportCandidate(state, projectId, taskId, candidate, metadat
     checkpoints: Array.isArray(candidate.checkpoints) ? candidate.checkpoints.length : 0,
     decisions: Array.isArray(candidate.decisions) ? candidate.decisions.length : 0,
     sessions: Array.isArray(candidate.sessions) ? candidate.sessions.length : 0,
+    rules: Array.isArray(candidate.knowledge?.rules) ? candidate.knowledge.rules.length : 0,
+    playbooks: Array.isArray(candidate.knowledge?.playbooks) ? candidate.knowledge.playbooks.length : 0,
   };
   const summaryParts = Object.entries(counts).filter(([, value]) => value > 0).map(([key, value]) => `${key} ${value}`);
   const latestCheckpoint = Array.isArray(candidate.checkpoints) ? candidate.checkpoints[0] : undefined;
@@ -774,6 +877,7 @@ function recordCodexImportCandidate(state, projectId, taskId, candidate, metadat
   ];
   task.importCandidate = JSON.parse(serialized);
   task.importCandidateHash = fingerprint;
+  if (candidate.knowledge) recordKnowledgeCandidates(state, projectId, taskId, candidate.knowledge);
   task.candidate = {
     summary,
     completed: ["Codex Project 已完成只读盘点", "原始 Agent 运行与关联 rollout 正在上下文外独立归档"],
@@ -947,12 +1051,12 @@ function createTask(state, projectId, input) {
   return task;
 }
 
-function createAndDispatchOnboarding(state, projectId) {
+function createAndDispatchOnboarding(state, projectId, { userInvoked = false } = {}) {
   const project = getProject(state, projectId);
   const active = project.tasks.find(
-    (task) => task.workstream === "project-onboarding" && ["ready", "in_progress", "review", "changes_requested"].includes(task.status),
+    (task) => task.workstream === "project-onboarding" && ["ready", "in_progress", "awaiting_result", "review", "changes_requested", "failed", "timed_out"].includes(task.status),
   );
-  if (active?.status === "in_progress" && active.run) {
+  if (active?.run && ["in_progress", "awaiting_result", "review"].includes(active.status)) {
     const session = project.sessions.find((item) => item.id === active.run.sessionId);
     if (!session) throw new Error("Onboarding Session not found");
     return { task: active, session, missionPacket: buildMissionPacket(project, active, session), reused: true };
@@ -964,7 +1068,7 @@ function createAndDispatchOnboarding(state, projectId) {
     agent: "codex",
     sessionPolicy: "warm",
   });
-  return { ...dispatchTask(state, projectId, task.id), reused: false };
+  return { ...(userInvoked ? prepareUserAgentTask(state, projectId, task.id) : dispatchTask(state, projectId, task.id)), reused: false };
 }
 
 function attachExternalThread(state, projectId, taskId, external) {
@@ -978,11 +1082,40 @@ function attachExternalThread(state, projectId, taskId, external) {
   task.run.processId = Number.isFinite(Number(external.processId)) ? Number(external.processId) : undefined;
   task.run.status = "running";
   task.run.phase = "agent_starting";
-  task.run.progress = Math.max(task.run.progress || 0, 8);
+  task.run.leaseStartedAt ||= now();
+  task.run.progress = undefined;
   task.run.lastEventAt = now();
   task.run.desktopOpened = Boolean(external.desktopOpened);
   task.launchError = undefined;
   project.events.unshift({ id: randomUUID(), type: "codex.thread.started", at: now(), detail: task.run.externalThreadId });
+  project.updatedAt = now();
+  return task;
+}
+
+/** Bind a persistent Codex thread that the user will run in the native
+ * Desktop client. The thread id is known immediately, but no turn or backend
+ * process belongs to Harness yet. */
+function attachUserInvokedThread(state, projectId, taskId, external) {
+  const project = getProject(state, projectId);
+  const task = getTask(project, taskId);
+  if (!task.run) throw new Error("Task has no active run");
+  task.run.externalThreadId = String(external.threadId || "");
+  task.run.externalTurnId = undefined;
+  task.run.externalAgent = "codex";
+  task.run.externalProjectId = external.projectId ? String(external.projectId) : undefined;
+  task.run.userPrompt = external.userPrompt ? String(external.userPrompt).slice(0, 120000) : task.run.userPrompt;
+  task.run.processId = undefined;
+  task.run.status = "awaiting_user";
+  task.run.phase = "user_action_required";
+  task.run.progress = 0;
+  task.run.userActionRequired = true;
+  task.run.lastEventAt = now();
+  task.run.desktopOpened = Boolean(external.desktopOpened);
+  task.launchError = undefined;
+  task.status = "awaiting_result";
+  const session = project.sessions.find((item) => item.id === task.run.sessionId);
+  if (session) session.status = "awaiting_result";
+  project.events.unshift({ id: randomUUID(), type: "codex.visible-thread.ready", at: now(), detail: task.run.externalThreadId });
   project.updatedAt = now();
   return task;
 }
@@ -993,10 +1126,19 @@ function recordAgentEvent(state, projectId, taskId, event = {}) {
   const task = getTask(project, taskId);
   if (!task.run) throw new Error("Task has no active run");
   const at = event.at || now();
+  if (task.run.status === "awaiting_user" && event.kind === "progress") {
+    task.run.status = "running";
+    task.run.userActionRequired = false;
+    task.status = "in_progress";
+    task.run.leaseStartedAt ||= at;
+    const session = project.sessions.find((item) => item.id === task.run.sessionId);
+    if (session) session.status = "executing";
+  }
   task.run.eventCount = (task.run.eventCount || 0) + 1;
   task.run.lastEventAt = at;
   if (event.phase) task.run.phase = String(event.phase);
-  if (Number.isFinite(Number(event.progress))) task.run.progress = Math.max(0, Math.min(100, Number(event.progress)));
+  if (typeof event.progress === "number" && Number.isFinite(event.progress)) task.run.progress = Math.max(0, Math.min(100, event.progress));
+  else if (event.kind === "progress") task.run.progress = undefined;
   if (event.detail) task.run.lastEvent = String(event.detail).slice(0, 500);
   project.events.unshift({
     id: randomUUID(),
@@ -1005,6 +1147,36 @@ function recordAgentEvent(state, projectId, taskId, event = {}) {
     detail: String(event.detail || event.type || "Agent event").slice(0, 500),
   });
   project.updatedAt = at;
+  return task;
+}
+
+function reportTaskStatus(state, projectId, taskId, input = {}) {
+  const project = getProject(state, projectId);
+  const task = getTask(project, taskId);
+  if (!task.run) throw new Error("Task has no active run");
+  if (!input.runId || String(input.runId) !== String(task.run.id)) throw new Error("RUN_MISMATCH: task run does not match status report");
+  if (task.run.status === "timed_out" || task.status === "timed_out") throw new Error("RUN_TERMINAL: task lease has timed out");
+  const reportedAt = String(input.at || now());
+  const reportedStatus = ["running", "heartbeat", "blocked", "completed", "failed"].includes(String(input.state || ""))
+    ? String(input.state)
+    : "heartbeat";
+  if (task.run.status === "awaiting_user" && ["running", "heartbeat", "blocked", "completed", "failed"].includes(reportedStatus)) {
+    task.run.status = "running";
+    task.run.userActionRequired = false;
+    task.status = "in_progress";
+    task.run.leaseStartedAt ||= reportedAt;
+    const session = project.sessions?.find((item) => item.id === task.run.sessionId);
+    if (session) session.status = "executing";
+  }
+  task.run.reportedStatus = reportedStatus;
+  task.run.reportedAt = reportedAt;
+  task.run.lastEventAt = reportedAt;
+  if (input.phase) task.run.phase = String(input.phase).slice(0, 120);
+  if (input.detail) task.run.lastEvent = String(input.detail).slice(0, 500);
+  if (typeof input.progress === "number" && Number.isFinite(input.progress)) task.run.progress = Math.max(0, Math.min(100, input.progress));
+  project.events ||= [];
+  project.events.unshift({ id: randomUUID(), type: `agent.status.${reportedStatus}`, at: reportedAt, detail: `${task.title}${input.detail ? ` · ${String(input.detail).slice(0, 300)}` : ""}` });
+  project.updatedAt = reportedAt;
   return task;
 }
 
@@ -1037,7 +1209,7 @@ function markRunCompleted(state, projectId, taskId, detail) {
     };
   }
   const session = project.sessions.find((item) => item.id === task.run.sessionId);
-  // An automatic Review Agent can accept the candidate before the app-server
+  // An automatic Review Agent can accept the candidate before the Desktop 原生控制面
   // emits turn/completed. Do not regress an accepted/changes-requested task
   // back into an awaiting-result session when that late event arrives.
   if (session) {
@@ -1090,7 +1262,7 @@ function recordGitSnapshot(state, projectId, gitSnapshot) {
 
 /**
  * Record what the Harness can actually prove about the external Codex
- * Project.  A successful app-server `project/create` proves the official
+ * Project.  A successful Desktop 原生控制面 `project/create` proves the official
  * database row, but not that an already-running Desktop renderer has loaded
  * it.  Keep that distinction durable so the UI cannot turn a database fact
  * into a false sidebar claim.
@@ -1105,14 +1277,12 @@ function setCodexProjectSync(state, projectId, input = {}) {
   const next = {
     state: syncState,
     ...(officialProjectId ? { officialProjectId } : {}),
-    ...(input.legacyProjectId ? { legacyProjectId: String(input.legacyProjectId) } : {}),
     checkedAt: String(input.checkedAt || now()),
     ...(input.detail ? { detail: String(input.detail).slice(0, 500) } : syncState === "desktop-restart-required" ? { detail: CODEX_PROJECT_RESTART_DETAIL } : {}),
   };
   const comparable = (value) => JSON.stringify({
     state: value?.state,
     officialProjectId: value?.officialProjectId,
-    legacyProjectId: value?.legacyProjectId,
     detail: value?.detail,
   });
   if (comparable(project.codexProjectSync) !== comparable(next)) {
@@ -1146,12 +1316,60 @@ function setExternalDesktopOpened(state, projectId, taskId, opened) {
 }
 
 function markControlSessionOpened(state, projectId, role, packetPath) {
+  return markControlSessionRequested(state, projectId, role, packetPath);
+}
+
+function markControlSessionRequested(state, projectId, role, packetPath) {
   const project = getProject(state, projectId);
   const session = project.sessions.find((item) => item.role === role);
   if (!session) throw new Error(`${role} control session not found`);
-  session.lastOpenedAt = now();
+  if (session.externalThreadId) {
+    session.externalThreadStatus = "bound";
+    session.externalThreadError = undefined;
+    if (packetPath) session.pendingDraftPath = String(packetPath);
+    session.lastOpenRequestedAt = now();
+    project.events.unshift({ id: randomUUID(), type: `control-session.${role}.reopen-requested`, at: now(), detail: session.externalThreadId });
+    project.updatedAt = now();
+    return session;
+  }
+  session.externalThreadStatus = "pending";
+  session.externalThreadError = undefined;
+  session.lastOpenRequestedAt = now();
   if (packetPath) session.pendingDraftPath = String(packetPath);
-  project.events.unshift({ id: randomUUID(), type: `control-session.${role}.opened`, at: now(), detail: session.id });
+  project.events.unshift({ id: randomUUID(), type: `control-session.${role}.requested`, at: now(), detail: session.id });
+  project.updatedAt = now();
+  return session;
+}
+
+function attachControlSessionThread(state, projectId, role, external = {}) {
+  const project = getProject(state, projectId);
+  const session = project.sessions.find((item) => item.role === role);
+  if (!session) throw new Error(`${role} control session not found`);
+  const threadId = String(external.threadId || "").trim();
+  if (!threadId) throw new Error("control threadId is required");
+  if (!["cto", "review"].includes(role)) throw new Error("Invalid control role");
+  const externalProjectId = String(external.projectId || session.externalProjectId || "").trim();
+  if (externalProjectId && [project.codexProjectId, session.externalProjectId].filter(Boolean).some(id => id !== externalProjectId)) {
+    throw new Error("CONTROL_PROJECT_MISMATCH: 控制线程不能跨项目静默改绑");
+  }
+  if (state.projects.some(p => p.sessions?.some(s => s.id !== session.id && s.externalThreadId === threadId))) {
+    throw new Error("CONTROL_THREAD_ALREADY_BOUND: 线程已属于另一个会话");
+  }
+  if (session.externalThreadId && session.externalThreadId !== threadId) {
+    if (external.expectedThreadId !== session.externalThreadId) {
+      throw new Error(`CONTROL_THREAD_REBIND_REQUIRED: ${role} 控制对话已绑定 ${session.externalThreadId}`);
+    }
+  }
+  if (session.externalThreadId === threadId && session.externalThreadStatus === "bound" && session.externalProjectId === (externalProjectId || undefined)
+    && (!external.packetPath || session.pendingDraftPath === external.packetPath)) return session;
+  session.externalThreadId = threadId;
+  session.externalProjectId = externalProjectId || undefined;
+  session.externalThreadStatus = "bound";
+  session.externalThreadError = undefined;
+  session.lastBoundAt = now();
+  session.lastOpenRequestedAt = undefined;
+  if (external.packetPath) session.pendingDraftPath = String(external.packetPath);
+  project.events.unshift({ id: randomUUID(), type: `control-session.${role}.attached`, at: now(), detail: threadId });
   project.updatedAt = now();
   return session;
 }
@@ -1160,9 +1378,27 @@ function markExternalLaunchFailed(state, projectId, taskId, error) {
   const project = getProject(state, projectId);
   project.events ||= [];
   const task = getTask(project, taskId);
+  const failedAt = now();
+  const launchError = String(error || "Codex launch failed");
+  // Keep the failed hand-off run in the bounded run history before clearing
+  // the live slot.  A missing thread is a product error, not an excuse to
+  // erase the run id and lose the evidence needed to diagnose/retry it.
+  if (task.run) {
+    task.runHistory ||= [];
+    task.runHistory.unshift({
+      ...task.run,
+      status: "failed",
+      phase: "launch_failed",
+      error: launchError,
+      completedAt: failedAt,
+      lastEventAt: failedAt,
+      lastEvent: launchError.slice(0, 500),
+    });
+    task.runHistory = task.runHistory.slice(0, 12);
+  }
   task.status = "ready";
   updateSectionForTask(project, task, "failed");
-  task.launchError = String(error || "Codex launch failed");
+  task.launchError = launchError;
   const session = task.run && project.sessions.find((item) => item.id === task.run.sessionId);
   if (session) session.status = "retired";
   task.run = undefined;
@@ -1171,12 +1407,12 @@ function markExternalLaunchFailed(state, projectId, taskId, error) {
       ...(project.codexImport || {}),
       status: "failed",
       error: task.launchError,
-      failedAt: now(),
+      failedAt,
       detail: "Codex 回填对话未能启动，可重试。",
     };
   }
-  project.events.unshift({ id: randomUUID(), type: "codex.thread.failed", at: now(), detail: task.launchError });
-  project.updatedAt = now();
+  project.events.unshift({ id: randomUUID(), type: "codex.thread.failed", at: failedAt, detail: task.launchError });
+  project.updatedAt = failedAt;
   return task;
 }
 
@@ -1197,7 +1433,7 @@ function dispatchTask(state, projectId, taskId) {
   const task = getTask(project, taskId);
   ensureProjectSections(project);
   if (project.status !== "active") throw new Error(`项目当前为“${project.status || "未知"}”，不能启动任务`);
-  if (!["ready", "backlog", "changes_requested", "failed"].includes(task.status)) throw new Error("Task cannot be dispatched");
+  if (!["ready", "backlog", "changes_requested", "failed", "timed_out"].includes(task.status)) throw new Error("Task cannot be dispatched");
   const dependencies = (task.dependsOn || []).map((id) => project.tasks.find((item) => item.id === id));
   const unknownDependencies = (task.dependsOn || []).filter((id) => !project.tasks.some((item) => item.id === id));
   if (unknownDependencies.length) throw new Error("任务依赖不存在，请先确认依赖任务");
@@ -1252,6 +1488,11 @@ function dispatchTask(state, projectId, taskId) {
 
   task.status = "in_progress";
   task.baseRevision = project.revision;
+  if (task.run) {
+    task.runHistory ||= [];
+    task.runHistory.unshift({ ...task.run });
+    task.runHistory = task.runHistory.slice(0, 12);
+  }
   task.run = {
     id: randomUUID(),
     sessionId: session.id,
@@ -1260,7 +1501,7 @@ function dispatchTask(state, projectId, taskId) {
     startedAt: now(),
     status: "starting",
     phase: "queued",
-    progress: 4,
+    progress: undefined,
     eventCount: 0,
     sectionId: section.id,
     reviewSessionId: project.controlSessions?.reviewId,
@@ -1280,10 +1521,10 @@ function dispatchTask(state, projectId, taskId) {
 
 /** Prepare a Claude Code/Hermes task for a user-invoked session. No PTY or
  * OAuth automation is attempted; the durable run simply waits for the user
- * to open the workspace, use the injected skill, and submit a result. */
+ * to open the workspace, read the bundled handoff protocol path, and submit a result. */
 function prepareUserAgentTask(state, projectId, taskId) {
   const result = dispatchTask(state, projectId, taskId);
-  if (!["claude", "hermes"].includes(result.task.agent)) throw new Error("Only user-invoked agents use this path");
+  if (!["codex", "claude", "hermes"].includes(result.task.agent)) throw new Error("Unsupported user-invoked agent");
   result.task.status = "awaiting_result";
   result.task.run.status = "awaiting_user";
   result.task.run.phase = "user_action_required";
@@ -1353,18 +1594,96 @@ function createConversationSession(state, projectId, input = {}) {
   return session;
 }
 
+function ensureProjectKnowledge(project) {
+  project.knowledgeCandidates ||= [];
+  project.ruleCards ||= [];
+  project.playbooks ||= [];
+  return project;
+}
+
+function recordKnowledgeCandidates(state, projectId, taskId, knowledge = {}) {
+  const project = ensureProjectKnowledge(getProject(state, projectId));
+  const timestamp = now();
+  const incoming = [
+    ...(Array.isArray(knowledge.rules) ? knowledge.rules : []),
+    ...(Array.isArray(knowledge.playbooks) ? knowledge.playbooks : []),
+  ];
+  for (const candidate of incoming) {
+    if (!candidate?.id || !["rule", "playbook"].includes(String(candidate.type))) continue;
+    const existing = project.knowledgeCandidates.find((item) => item.id === candidate.id);
+    if (existing) continue;
+    project.knowledgeCandidates.push({ ...structuredClone(candidate), status: "pending", importTaskId: taskId, createdAt: timestamp });
+  }
+  if (incoming.length) {
+    project.events ||= [];
+    project.events.unshift({ id: randomUUID(), type: "knowledge.candidates.recorded", at: timestamp, detail: `${incoming.length} 个用户规则 / Playbook 候选等待审核` });
+    project.updatedAt = timestamp;
+  }
+  return project.knowledgeCandidates;
+}
+
+function acceptKnowledgeCandidate(state, projectId, candidateId) {
+  const project = ensureProjectKnowledge(getProject(state, projectId));
+  const candidate = project.knowledgeCandidates.find((item) => item.id === candidateId);
+  if (!candidate || candidate.status !== "pending") throw new Error("KNOWLEDGE_CANDIDATE_NOT_PENDING");
+  const timestamp = now();
+  candidate.status = "accepted";
+  candidate.acceptedAt = timestamp;
+  const target = candidate.type === "playbook" ? project.playbooks : project.ruleCards;
+  if (!target.some((item) => item.id === candidate.id)) {
+    const accepted = structuredClone(candidate);
+    delete accepted.importTaskId;
+    delete accepted.rejectionReason;
+    accepted.status = "active";
+    accepted.acceptedAt = timestamp;
+    target.unshift(accepted);
+  }
+  project.contractRevision = Number(project.contractRevision || 1) + 1;
+  project.events ||= [];
+  project.events.unshift({ id: randomUUID(), type: `knowledge.${candidate.type}.accepted`, at: timestamp, detail: candidate.title || candidate.id });
+  project.updatedAt = timestamp;
+  return candidate;
+}
+
+function rejectKnowledgeCandidate(state, projectId, candidateId, reason = "用户拒绝知识候选") {
+  const project = ensureProjectKnowledge(getProject(state, projectId));
+  const candidate = project.knowledgeCandidates.find((item) => item.id === candidateId);
+  if (!candidate || candidate.status !== "pending") throw new Error("KNOWLEDGE_CANDIDATE_NOT_PENDING");
+  const timestamp = now();
+  candidate.status = "rejected";
+  candidate.rejectedAt = timestamp;
+  candidate.rejectionReason = String(reason || "用户拒绝知识候选").trim().slice(0, 500);
+  project.events ||= [];
+  project.events.unshift({ id: randomUUID(), type: `knowledge.${candidate.type}.rejected`, at: timestamp, detail: `${candidate.title || candidate.id} · ${candidate.rejectionReason}` });
+  project.updatedAt = timestamp;
+  return candidate;
+}
+
+function relevantPlaybooks(project, task) {
+  const text = `${task?.title || ""} ${task?.workstream || ""}`.toLowerCase();
+  return (project.playbooks || []).filter((item) => item.status === "active").map((item) => {
+    const fields = [item.title, item.trigger, item.purpose].map((value) => String(value || "").toLowerCase()).filter(Boolean);
+    const score = fields.reduce((total, field) => total + (text.includes(field) || field.includes(text.trim()) ? 10 : field.split(/[\s,，。:：/\\_-]+/).filter((token) => token.length >= 2 && text.includes(token)).length), 0);
+    return { item, score };
+  }).filter(({ score }) => score > 0).sort((left, right) => right.score - left.score).slice(0, 5).map(({ item }) => item);
+}
+
 function buildMissionPacket(project, task, session) {
   const accepted = project.checkpoints[0];
   const section = getSection(project, task.sectionId);
-  // launchHarnessTask creates a fresh provider thread. A logical warm Section
-  // is useful for routing, but it is not proof that the provider has prior
-  // context, so every new task gets a self-contained FULL packet.
+  // A logical warm Section is useful for routing, but Desktop deep links do not
+  // prove prior conversation context; every new task gets a self-contained FULL packet.
   const recentCheckpoints = project.checkpoints.slice(0, 6);
+  const applicableRules = (project.ruleCards || []).filter((item) => item.status === "active").slice(0, 12);
+  const applicablePlaybooks = relevantPlaybooks(project, task);
   const packet = [
     "# AI Project Harness · FULL PACKET",
     `PROJECT: ${project.name}`,
     `PROJECT_REVISION: R${project.revision}`,
     `CONTRACT_REVISION: C${Number(project.contractRevision || 1)}`,
+    `HARNESS_PROJECT_ID: ${project.id}`,
+    `HARNESS_TASK_ID: ${task.id}`,
+    `HARNESS_RUN_ID: ${task.run?.id || "pending"}`,
     `SESSION_CURSOR: R${session.cursor}`,
     `PROJECT_GOAL: ${project.goal || "尚未填写项目目标。"}`,
     `OBJECTIVE: ${project.objective.title}`,
@@ -1381,7 +1700,8 @@ function buildMissionPacket(project, task, session) {
     ...(recentCheckpoints.length ? ["RECENT_ACCEPTED_CHECKPOINTS:", ...recentCheckpoints.map((item) => `- R${item.revision}: ${item.summary}`)] : []),
     project.constraints?.length ? `CONSTRAINTS: ${project.constraints.slice(0, 10).join("; ")}` : "CONSTRAINTS: none recorded",
     project.blockers?.length ? `BLOCKERS: ${project.blockers.slice(0, 5).join("; ")}` : "BLOCKERS: none recorded",
-    "RETURN: submit a structured Task Result with summary, acceptance status, evidence, remaining work, and next step.",
+    ...(applicableRules.length ? ["APPLICABLE_USER_RULES:", ...applicableRules.map((item) => `- [${item.kind || "prefer"}] ${item.statement}${item.rationale ? `（原因：${item.rationale}）` : ""}`)] : []),
+    ...(applicablePlaybooks.length ? ["APPLICABLE_PLAYBOOKS:", ...applicablePlaybooks.flatMap((item) => [`- ${item.title} v${item.version || 1} · 触发：${item.trigger}`, ...(item.steps || []).slice(0, 12).map((step) => `  ${step.order || 1}. ${step.action}${step.validation ? `；验证：${step.validation}` : ""}`)])] : []),
   ].join("\n");
   const maxChars = Number(section?.maxContextChars || 12000);
   if (packet.length <= maxChars) return packet;
@@ -1400,6 +1720,12 @@ function submitTaskResult(state, projectId, taskId, input) {
   }
   const summary = String(input.summary || "").trim().slice(0, 4000);
   if (!summary) throw new Error("Result summary is required");
+  const templateSummary = summary === "What changed or what was learned"
+    && String(input.nextStep || "").trim() === "Smallest useful next action";
+  const templateEvidence = Array.isArray(input.evidence) && input.evidence.some((item) =>
+    String(item?.value || "").trim() === "verifiable reference"
+    || String(item?.type || "").trim() === "file | git | test | note");
+  if (templateSummary || templateEvidence) throw new Error("TEMPLATE_RESULT: 示例占位符不是任务结果，请提交实际变更与证据");
   const normalizeList = (value) => Array.isArray(value) ? value.map(String).map((item) => item.trim().slice(0, 800)).filter(Boolean).slice(0, 50) : [];
   const acceptance = Array.isArray(input.acceptance)
     ? input.acceptance.filter((item) => item && typeof item === "object").slice(0, 50).map((item, index) => ({
@@ -1423,6 +1749,7 @@ function submitTaskResult(state, projectId, taskId, input) {
   };
   task.run.submittedAt = now();
   task.run.resultSource = input.source === "agent-auto" ? "agent-auto" : "manual";
+  task.run.userActionRequired = false;
   task.run.status = "awaiting_review";
   task.run.phase = "awaiting_review";
   task.status = "review";
@@ -1466,29 +1793,24 @@ function autoReviewTaskResult(state, projectId, taskId, options = {}) {
     && task.candidate.acceptance.every((item) => String(item.status).toLowerCase() === "pass");
   const hasEvidence = Array.isArray(task.candidate.evidence)
     && task.candidate.evidence.some((item) => String(item?.value || "").trim());
-  const approved = !hasDuplicateCriteria && allRequiredPass && hasEvidence;
-  const inconclusive = failedCriteria.length === 0 && !approved;
+  const rulesPassed = !hasDuplicateCriteria && allRequiredPass && hasEvidence;
+  const inconclusive = failedCriteria.length === 0;
   task.review = {
-    status: approved ? "approved" : inconclusive ? "inconclusive" : "changes_requested",
-    agent: "codex",
-    automatic: approved && options.accept !== false,
-    sessionId: project.controlSessions?.reviewId,
+    status: inconclusive ? "inconclusive" : "changes_requested",
+    agent: "rule-checker",
+    automatic: false,
+    rulesPassed,
+    evidenceVerified: false,
     reviewedAt,
-    notes: approved
-      ? "Review Agent 已核对完整验收项与非空证据。"
+    notes: rulesPassed
+      ? "形式检查通过；验收项和证据仍是 Agent 自述，未完成独立审核。请核对实际证据后接受。"
       : inconclusive
-        ? "自动审核证据不完整：验收项必须与任务契约一一对应、全部通过且至少包含一条证据。"
+        ? "形式检查未通过：验收项必须与任务契约一一对应、全部通过且至少包含一条证据。请补齐后人工审核。"
         : `有 ${failedCriteria.length} 条验收条件未通过。`,
   };
-  const reviewSession = project.sessions.find((session) => session.id === project.controlSessions?.reviewId);
-  if (reviewSession) {
-    reviewSession.status = "warm";
-    reviewSession.lastReviewedAt = reviewedAt;
-  }
-  project.events.unshift({ id: randomUUID(), type: approved ? "review.agent.approved" : inconclusive ? "review.agent.inconclusive" : "review.agent.changes_requested", at: reviewedAt, detail: task.title });
+  project.events.unshift({ id: randomUUID(), type: inconclusive ? "review.rules.inconclusive" : "review.rules.changes_requested", at: reviewedAt, detail: task.title });
   project.updatedAt = reviewedAt;
-  if (approved && options.accept !== false) return acceptTaskResult(state, projectId, taskId);
-  if (!approved && !inconclusive) requestChanges(state, projectId, taskId);
+  if (!inconclusive) requestChanges(state, projectId, taskId);
   return task;
 }
 
@@ -1559,6 +1881,9 @@ function acceptTaskResult(state, projectId, taskId) {
   task.run.userActionRequired = false;
   if (task.review) {
     task.review.status = "approved";
+    task.review.agent = "user";
+    task.review.automatic = false;
+    task.review.notes = "用户明确接受；此操作不代表系统已独立核验全部证据。";
     task.review.acceptedAt = acceptedAt;
   }
   const session = project.sessions.find((item) => item.id === task.run.sessionId);
@@ -1625,7 +1950,9 @@ module.exports = {
   createTask,
   createAndDispatchOnboarding,
   attachExternalThread,
+  attachUserInvokedThread,
   recordAgentEvent,
+  reportTaskStatus,
   markRunCompleted,
   markRunFailed,
   recordGitSnapshot,
@@ -1633,11 +1960,16 @@ module.exports = {
   setCodexProjectSync,
   setExternalDesktopOpened,
   markControlSessionOpened,
+  markControlSessionRequested,
+  attachControlSessionThread,
   markExternalLaunchFailed,
   dispatchTask,
   prepareUserAgentTask,
   stopTask,
   createConversationSession,
+  recordKnowledgeCandidates,
+  acceptKnowledgeCandidate,
+  rejectKnowledgeCandidate,
   submitTaskResult,
   autoReviewTaskResult,
   acceptTaskResult,
@@ -1649,6 +1981,9 @@ module.exports = {
   assignTaskToSection,
   closeSection,
   archiveProject,
+  archiveProjectWithTaskStop,
+  expireTaskLeases,
+  removeProject,
   archiveSection,
   restoreProject,
   setProjectStatus,

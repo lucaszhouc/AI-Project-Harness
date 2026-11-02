@@ -1,5 +1,4 @@
 const { runStillOwnsThread } = require("./conversation-open.cjs");
-const { selectLatestCodexThread } = require("./codex-adapter.cjs");
 
 function updateStore(store, mutator) {
   if (typeof store?.update === "function") return store.update(mutator);
@@ -11,9 +10,8 @@ function taskFor(machine, state, projectId, taskId) {
   return { project, task: project.tasks.find((item) => item.id === taskId) };
 }
 
-// A project may still have durable Codex thread ids even when the CLI is not
-// currently discoverable on PATH. Keep the top-level "open recent" action
-// useful by selecting the newest persisted member before using the CLI index.
+// A project may still have a durable Desktop thread id from an explicit user
+// handoff. No provider executable or background index is consulted here.
 function selectPersistedProjectThread(project) {
   const candidates = [
     ...(project?.sessions || [])
@@ -43,7 +41,6 @@ function createTaskOpenHandler({
   isProcessAlive = () => false,
   buildSnapshot,
   openExternal,
-  listThreads,
   openWorkspace,
   isThreadActive = () => false,
 }) {
@@ -66,50 +63,29 @@ function createTaskOpenHandler({
     }
 
     const codex = await detectCodex();
-    // Exact Desktop deep links do not need the CLI executable. Keep the
-    // deep-link path usable when the user launched Harness without Codex on
-    // PATH; the project fallback will still report a concrete error below.
-    const executable = codex.installed ? codex.path : "";
+    const threadId = task.run?.externalThreadId;
 
-    // Pre-0.0.13 tasks may not have persisted their thread id. Recover the
-    // newest durable Codex conversation for this exact project path so the
-    // task remains actionable after a migration. This is read-only and best
-    // effort; an uncertain lookup falls through to the project entry below.
-    let recoveredThread;
-    if (!task.run?.externalThreadId && codex.installed && typeof listThreads === "function") {
-      try {
-        const threads = await listThreads({ executable: codex.path, cwd: project.path });
-        recoveredThread = selectLatestCodexThread(threads, project.path);
-      } catch {
-        // The Desktop index can be unavailable while Codex is updating. The
-        // project-path fallback still gives the user a deterministic entry.
-      }
+    if (threadId && isThreadActive(threadId)) {
+      return {
+        opened: false,
+        requestAccepted: false,
+        verified: false,
+        supported: true,
+        capability: "active-thread-deferred",
+        threadId,
+        message: "该对话正在由 Harness 执行；连接释放后才能安全打开 Codex Desktop 对话。",
+        snapshot: await buildSnapshot(),
+      };
     }
-    const threadId = task.run?.externalThreadId || recoveredThread?.id;
 
-    const terminalRun = task.run && ["completed", "failed"].includes(String(task.run.status || "").toLowerCase());
     let cleanupError;
-    if (terminalRun && task.run?.processId && isProcessAlive(task.run.processId)) {
-      const cleaned = await terminateProcessTree(task.run.processId);
-      if (cleaned?.terminated) {
-        updateStore(store, (state) => {
-          const latest = taskFor(machine, state, projectId, taskId).task;
-          if (latest?.run) latest.run.processId = undefined;
-        });
-        ({ project, task } = taskFor(machine, store.state, projectId, taskId));
-      } else {
-        cleanupError = cleaned?.error || "无法释放 Codex app-server 进程";
-      }
-    }
 
-    const opened = await openDesktop(executable, project.path, {
+    const opened = await openDesktop("", project.path, {
       threadId,
-      // A live app-server owns the writer lock. Opening its exact deep link
+      // A live Desktop 原生控制面 owns the writer lock. Opening its exact deep link
       // would only show Codex's "opened in another app" screen, so use the
       // project entry until that process is released.
-      preferProjectPath: Boolean(cleanupError)
-        || runStillOwnsThread(task.run, isProcessAlive)
-        || Boolean(threadId && isThreadActive(threadId)),
+      preferProjectPath: Boolean(threadId && isThreadActive(threadId)),
       openExternal,
     });
     if (task.run?.externalThreadId) {
@@ -124,13 +100,12 @@ function createTaskOpenHandler({
     const exact = opened.capability === "thread-deep-link";
     const message = opened.opened
       ? exact
-        ? recoveredThread && !task.run?.externalThreadId
-          ? "已打开该项目最近的 Codex 对话（旧任务未保存独立 thread）。"
-          : "已打开 Codex 当前任务对话。"
+          ? "已向 Codex 请求打开任务对话；尚未验证原生窗口是否完成跳转。"
+
         : cleanupError
           ? `已打开 Codex 项目目录，但未能精确跳转：${cleanupError}`
           : task.run
-            ? "已打开 Codex 项目目录；当前任务仍在执行，Harness 已保留该任务 ID。"
+            ? "已打开 Codex 项目目录，并非任务对话；该后台任务的实时信息仅在 Harness 可见。"
             : "已打开 Codex 项目目录；最近对话深链不可用，Harness 已保留该任务记录。"
       : cleanupError
         ? `Codex 任务仍被运行进程占用，已打开项目入口但未能精确跳转：${cleanupError}`
@@ -138,7 +113,7 @@ function createTaskOpenHandler({
     return {
       ...opened,
       supported: true,
-      capability: opened.capability || "project-path-fallback",
+      capability: opened.capability || "desktop-native-only-blocked",
       threadId,
       message,
       snapshot: await buildSnapshot(),
@@ -153,37 +128,37 @@ function createProjectOpenHandler({
   openDesktop,
   buildSnapshot,
   openExternal,
-  listThreads,
   isThreadActive = () => false,
 }) {
   return async function openProject(projectId) {
     const project = machine.getProject(store.state, projectId);
     const codex = await detectCodex();
-    const executable = codex.installed ? codex.path : "";
-    let recentThread;
-    if (codex.installed && typeof listThreads === "function") {
-      try {
-        const threads = await listThreads({ executable: codex.path, cwd: project.path });
-        recentThread = selectLatestCodexThread(threads, project.path);
-      } catch {
-        // Opening the project itself remains useful when the thread index is
-        // unavailable or Codex is restarting.
-      }
-    }
-    recentThread ||= selectPersistedProjectThread(project);
+    const recentThread = selectPersistedProjectThread(project);
     if (!codex.installed && !recentThread) {
       return {
         opened: false,
         supported: false,
         capability: "codex-unavailable",
         message: "未检测到 Codex，且项目没有可恢复的持久对话；请启动 Codex 后重试。",
-        error: "Codex CLI executable unavailable",
+        error: "DESKTOP_NATIVE_UNAVAILABLE",
         snapshot: await buildSnapshot(),
       };
     }
-    const opened = await openDesktop(executable, project.path, {
+    if (recentThread && isThreadActive(recentThread.id)) {
+      return {
+        opened: false,
+        requestAccepted: false,
+        verified: false,
+        supported: true,
+        capability: "active-thread-deferred",
+        threadId: recentThread.id,
+        message: "该项目最近对话正在由 Harness 执行；连接释放后才能安全打开 Codex Desktop 对话。",
+        snapshot: await buildSnapshot(),
+      };
+    }
+    const opened = await openDesktop("", project.path, {
       threadId: recentThread?.id,
-      // A live app-server still owns the thread writer lock. Keep the safe
+      // A live Desktop 原生控制面 still owns the thread writer lock. Keep the safe
       // project entry in that case instead of sending Desktop to its lock
       // error screen.
       preferProjectPath: !recentThread || isThreadActive(recentThread.id),
@@ -192,7 +167,7 @@ function createProjectOpenHandler({
     return {
       ...opened,
       supported: true,
-      capability: opened.capability || "project-path-fallback",
+      capability: opened.capability || "desktop-native-only-blocked",
       threadId: recentThread?.id,
       message: opened.opened
         ? recentThread && opened.capability === "thread-deep-link"

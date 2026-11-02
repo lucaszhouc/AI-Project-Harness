@@ -1,3 +1,7 @@
+> Historical material. Desktop-native repair is incomplete; see [current status](../CURRENT_REPAIR_STATUS.md). Older execution and PASS claims do not describe this source revision.
+
+> 当前状态：历史归档，仅保留当时的证据与决策。2026-10-24 起，运行时唯一有效路线是 Codex Desktop 原生深链/内置交接；本文中关于外部命令、后端协议或旧 smoke 的描述均不可作为实施指令。`DEPRECATED_HISTORICAL_RECORD`
+
 # P0 重构批次交付报告
 
 状态：PASS_WITH_MANUAL_GATES_PENDING
@@ -36,7 +40,7 @@
 | TypeScript + Vite build | PASS | `tsc --noEmit && vite build`。 |
 | renderer smoke | PASS | 双语、滚动、失败/警告状态、无横向溢出。 |
 | 隐藏 Electron app smoke | PASS | `SMOKE_PASS: %TEMP%\aph-app-smoke-report.json`；隔离 profile，窗口保持隐藏且未置顶。 |
-| auto-review Electron smoke | PASS | `SMOKE_PASS: E:\_iva_workspace\aph-auto-review-smoke-2026-09-21T07-34-11-090Z\report.json`；严格三项契约全部匹配后才自动推进，持久状态、JSONL、原始归档、Codex import gate 均通过。 |
+| auto-review Electron smoke | PASS | `SMOKE_PASS: <local-only-evidence>`；严格三项契约全部匹配后才自动推进，持久状态、JSONL、原始归档、Codex import gate 均通过。 |
 | 最终 `npm run check:release` | PASS | 完整执行 tests + build + renderer + Electron + auto-review；最终 fresh run exit 0。较早两次分别暴露旧 smoke fixture 只提交 1/3 验收项、弹窗点击被一次异步重渲染吞掉；修正 fixture 与有界重试后重新完整通过。 |
 | `npm run smoke:codex-readonly` | PASS | 安装版 Codex `thread/list`，无创建、无模型调用。 |
 | `npm run smoke:codex-project-readonly` | PASS | 安装版 `project/list` / `thread/list`；Desktop 侧栏不在证明范围。 |

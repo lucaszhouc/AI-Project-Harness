@@ -1,9 +1,13 @@
+> Historical material. Desktop-native repair is incomplete; see [current status](docs/CURRENT_REPAIR_STATUS.md). Older execution and PASS claims do not describe this source revision.
+
+> 当前状态：历史归档，仅保留当时的证据与决策。2026-10-24 起，运行时唯一有效路线是 Codex Desktop 原生深链/内置交接；本文中关于外部命令、后端协议或旧 smoke 的描述均不可作为实施指令。`DEPRECATED_HISTORICAL_RECORD`
+
 ---
 title: AI Project Harness Dynamic Whitepaper
 working_title: AI Project Harness
 status: LIVING_DRAFT
-version: 0.23.0
-last_updated: 2026-09-14 16:00 JST
+version: 0.25.3
+last_updated: 2026-10-10 06:42:25 JST
 canonical: true
 ---
 
@@ -47,6 +51,23 @@ AI Project Harness 是一个附着在 Git 项目之上的本地 AI 工程状态�
 产品承诺不是“把所有历史永远塞进上下文”，而是：
 
 > 原始信息可以恢复；当前状态可以验证；每个新 Agent 只获得完成当前任务所需的最小上下文。
+
+### 1.1 当前实现真相（0.0.25-rc.4 本地候选）
+
+以下内容是当前候选的实现边界，不是把设计目标倒写成已完成事实：
+
+- `IMPLEMENTED / VERIFIED LOCALLY`：本地 Codex Desktop 是生产执行者。未设置 `APH_CODEX_EXECUTION_MODE` 或明确设置为 `visible` 时，Harness 创建真实官方 Project 和持久 thread，执行一次有界初始化以建立可读历史，打开 Desktop，并只读监视用户后续发送的真实 turn；Harness 不把初始化占位 turn 当作业务任务运行。
+- `IMPLEMENTED / VERIFIED LOCALLY`：`APH_CODEX_EXECUTION_MODE=managed` 只用于隔离 qualification 和自动化回归。它允许 Harness 通过真实 app-server 持有一次受控 turn，不是面向用户的默认执行路径。
+- `IMPLEMENTED / VERIFIED LOCALLY`：既有对话整理是独立的只读收集流程。用户选择对话后，Harness 把选中范围、固定默认整理目标和用户追加要求交给整理 thread；整理结果必须返回 `harness-import` 候选。候选经过用户审核后，才写入项目状态、知识索引、动态白皮书和原始归档。
+- `IMPLEMENTED / VERIFIED LOCALLY`：普通开发任务仍使用 Mission Packet；Mission Packet 是一次性任务上下文，不等于对话整理的知识包，也不等于整理指令。
+- `IMPLEMENTED / VERIFIED LOCALLY`：三种项目创建入口已经按真实用途拆开：新建空白项目只创建 Harness Project、官方 Codex Project、CTO/Review 控制面并打开 CTO；关键词整理执行自动发现与整理；手动选对话只整理勾选范围。三条入口点击后立即切换到统一创建进度弹窗，只有真实 `turn/start` 取得 thread/turn/process 后才显示“运行中”。
+- `IMPLEMENTED`：归档项目从主页活动项目列表隔离，只在“项目工具 → 已归档项目”中显示并可恢复。归档事务先停止 Harness 持有的活动运行并标记 `timed_out`，保留 thread、运行归档和事件；用户拥有的 Desktop 对话只停止 Harness 监视。
+- `IMPLEMENTED`：真实 Run 从首次 dispatch 后绑定 turn/process 或用户在可见对话中发送第一条进度开始计算 24 小时 lease。`ready`、`backlog`、`awaiting_user`、`review` 不计时；到期进入 `timed_out`，可创建新的 Run 重试，旧 Run 保存在历史中。
+- `IMPLEMENTED`：Agent 可以通过 MCP `report_task_status` 回写 `running`、`heartbeat`、`blocked`、`completed` 或 `failed`。状态回写只记录 Agent 声明；正式结束候选仍唯一来自 fenced `harness-result`，lease 是最终兜底。
+- `IMPLEMENTED / VERIFIED LOCALLY`：快照合并、Git 短缓存、事件合并、局部 DOM reconcile 和按操作锁定已覆盖空态、真实夹具、1200 任务和 64 并发快照；未知工作量不再显示无依据百分比。
+- `IMPLEMENTED / VERIFIED LOCALLY`：形式检查明确标记为 `rule-checker`，没有独立证据不能自动推进 Project HEAD；结果必须经过用户接受。
+- `LIMITATION`：原生 Codex 任务深链目前只能确认“请求已发出”，不能由 Harness 伪称“原生窗口已经跳转”；运行中的自有 app-server 会话不会被另一个窗口强行接管。
+- `LIMITATION`：真实原生 Codex 改码、停止/恢复、侧栏冷启动和 30–60 分钟连续使用仍需专用项目人工验收；自动化 qualification 不能代替这些门。关键词入口已接入 `thread/search` 与 `thread/searchOccurrences`，旧版本能力缺失时使用有界本地索引回退；跨厂商搜索和深度关系扩展仍不在当前 MVP。
 
 ## 2. 问题定义
 
@@ -264,10 +285,13 @@ Codex / Claude Code / Hermes
 - 完成、暂停、阻塞或 supersede objective。
 - 将本轮 session 与 objective 和 Git 状态关联。
 
-`DECIDED` Codex 首发有两条独立入口：
+`DECIDED` Codex 首发有三条互不混用的项目创建入口：
 
-- 空白创建：只建立 Harness Project；用户手填长期契约，之后再决定是否连接 Codex。
-- 既有历史收集：用户只输入一个近似主题。Harness 先对全部活跃与归档会话做全文检索，再按 Project ID、Git root、remote、cwd、父子线程、共享文件路径、包名和域名扩展关系；以消息 occurrence 为单位归类，将关联 rollout 在模型上下文外无损归档，最后让带 `MODE: IMPORT` 的专用 Agent 只整理有限证据。Agent 返回的 `harness-import` 只能成为候选；用户接受后才合并。
+- **新建空白项目**：创建 Harness Project、官方 Codex Project、CTO/Review 控制面并只打开 CTO；不创建整理 session，不搜索历史，不启动整理 turn。空白项目的 CTO 是后续用户工作的入口。
+- **关键词整理**：用户输入关键词、项目简称或表单目标。Harness 优先调用 Codex 官方 `thread/search`（活跃/归档）和 `thread/searchOccurrences`（消息级定位），把搜索命中、occurrence 和 Project/root/cwd/Git 关系信号合并成有界来源索引，再启动一次真实整理 thread。候选经过用户审核后才写入 Project Ledger、知识索引、动态白皮书和原始归档；能力缺失时使用有界本地索引回退并明确记录。
+- **手动选对话**：Harness 只把用户勾选的 thread ID、名称、rollout 路径和追加要求交给整理 thread。Codex 不得按相似标题、目录、父子线程、Project 归属或时间扩展范围；候选和写回都带 provenance。
+
+普通开发任务的 Mission Packet、关键词整理和手动选对话整理是三套不同输入/输出协议，不能互相替代。
 
 对话标题、Codex Project ID、目录 mtime、文件名日期和旧摘要都不能单独充当项目边界或“最新进展”。重复导入按来源 occurrence 与 revision 幂等合并；较旧 source revision 不能覆盖较新的 Git/GitHub 快照。
 
@@ -365,13 +389,15 @@ Skill 不负责把几 GB 内容送进模型。它只负责选择范围、调用�
 
 ### 10.4 Task
 
-Task 是最小用户验收单元。建议状态：backlog / ready / leased / in_progress / review / accepted / blocked / cancelled / superseded。
+Task 是最小用户验收单元。当前状态包括 `backlog`、`ready`、`in_progress`、`awaiting_user`、`awaiting_result`、`review`、`changes_requested`、`accepted`、`failed` 和 `timed_out`。`timed_out` 表示 Run lease 到期或项目归档时 Harness 停止跟踪；它保留证据并允许重新 dispatch，不推进 Project HEAD。
 
 最小字段：task contract、acceptance criteria、objective、可选 workstream、priority、base project revision、assigned agent policy 和 Git apply policy。
 
 ### 10.5 Run
 
 Run 表示一个 Agent 对一个 Task 的一次执行尝试。一个 Task 可以因失败、拒绝、冲突重放或更换 Agent 产生多个 Run；只有被用户接受的 Run 才能推进 Task 和 Project HEAD。
+
+每个真实 Run 有一个 24 小时 lease：计时从真实 turn/process 绑定，或可见 Desktop 对话收到第一条 Agent 进度时开始。Harness 每次启动恢复和 runtime heartbeat 都检查 lease；到期记录 `timeoutAt`、`timeoutReason`、`run.status=timed_out`，保存原始 thread、transcript、日志和事件。Agent 的 `report_task_status` 仅写入 `reportedStatus`、阶段、详情和进度，不直接完成 Task；Agent 必须随后提交 `harness-result`，由现有 Review gate 生成候选。
 
 最小字段：run ID、task、agent、session、base revision、started/ended time、candidate result、resource usage 和 outcome。
 
@@ -514,7 +540,7 @@ Agent 之间默认不直接转发彼此完整聊天。它们通过 Task、Projec
 - **新建空白项目**：只输入项目名，立即建立空白 Harness Project；目标、技术栈、工作区和 Codex 连接随后手填或通过 CTO 对话补全，不触发历史搜索。
 - **从既有历史收集**：只输入近似主题，立即开始正文检索并显示 collection preview；不要求精确对话名、Project ID 或路径。高级提示与排除项收进折叠区，只有候选簇歧义时才要求用户选择。
 
-两个动作都不在首屏暴露索引、目录扫描或模型参数；进度只显示“搜索历史 → 整理证据 → 等待审核”三个用户可理解的阶段。
+两个动作都不在首屏暴露索引、目录扫描或模型参数；空白创建显示“建立项目”，对话收集显示“读取已选对话 → 整理知识 → 等待审核”，普通任务显示“准备任务 → 执行 → 审核”。三条路径不能共用“任务包”文案。
 
 ### 12.2 项目驾驶舱
 
@@ -596,7 +622,9 @@ Harness 必须按 capability manifest 降级显示，不能假装所有厂商完
 
 ### 14.3 Codex 首发适配
 
-`IMPLEMENTED` Codex 是桌面 MVP 的默认预连接 Agent。Harness 使用本机 Codex CLI 的实验性 `app-server --stdio` 协议创建持久独立 thread、设置名称，并在 `turn/start` 输入中同时传入项目内置 `ai-project-harness` Skill 和 Bootstrap Packet。随后调用 `codex app <project>` 打开 Codex Desktop。
+`IMPLEMENTED` Codex 是桌面 MVP 的默认预连接 Agent。Harness 使用本机 Codex CLI 的实验性 `app-server --stdio` 协议创建官方 Project 和持久独立 thread、设置名称，并执行一次有界初始化 turn 让 Desktop 获得可读历史；初始化和后续 turn 只发送短 Prompt 与内置协议路径，不发送 `type: "skill"` 输入。随后调用 `codex app <project>` 打开 Codex Desktop。普通开发任务使用 Mission Packet；对话整理使用 Conversation Collection Instruction；两者的输入和结果协议分开。
+
+`IMPLEMENTED` Codex 线程不再通过 `turn/start` 注入 Skill。Harness 启动时一次解析并缓存当前安装位置的内置协议路径，在 CTO/Review、普通任务、Onboarding、关键词整理、选中对话和新对话 Prompt 中提供 `ai-project-harness`、`ai-project-harness-writeback`、状态 schema 和 MCP 入口；Codex 自己读取这些文件。回写协议规定 `projectId + taskId + runId` 身份、`report_task_status` 的五种状态、幂等 `operationId`、24 小时 lease 边界和唯一 fenced `harness-result` 字段；它不能直接改 Harness 状态文件、接受候选或推进 Project HEAD。
 
 `VERIFIED LOCALLY` 当前本机 `codex-cli 0.154.0-alpha.6.2` 暴露 `thread/search` 与 `thread/searchOccurrences`：前者可跨线程全文搜索并过滤活跃/归档状态，后者可定位单线程内可见 user message 与 final assistant message 的具体 turn、item 和匹配范围。`thread/list.searchTerm` 只搜索标题，不能承担项目内容收集。实测 `AI Project Harness` 约 750 ms 返回 3 个线程命中，而 `个人网站`、`网站`、`portfolio`、`Hero`、`lucaszhouc` 均为零结果；这证明原生检索速度足够，但单关键词召回不足，必须保留查询扩展和关系扩展。
 
@@ -632,7 +660,7 @@ v0.0.11 在本机 Codex Desktop 注册的 `codex://threads/<threadId>` 协议上
 - Codex / Claude Code 安装检测和用户主动启动。
 - Harness MCP / CLI 的最小读写协议，包括 task lease、state delta 和 candidate result。
 - Agent Pack：context、delta、import、task result、decision proposal、close objective request。
-- 主题驱动的既有历史收集：跨活跃/归档全文检索、消息级 occurrence 定位、关系扩展和候选簇审核。
+- 用户明确选择对话的只读知识收集：范围冻结、有限证据整理、SOP/规则/项目细节提取、候选审核和 Project Ledger 回写。
 - Codex 原生搜索与本地增量 SQLite FTS 的能力协商和兼容回退。
 - 至少一种真实大型 session 的流式归档、payload 去重和有界 Agent 整理。
 - 有 token 上限的 Mission Packet。
@@ -662,7 +690,7 @@ v0.0.11 在本机 Codex Desktop 注册的 `codex://threads/<threadId>` 协议上
 - 本地 JSON 状态持久化；损坏文件保留备份后安全重建。
 - 读取真实 Git branch、dirty、ahead/behind、worktree 和最近 commits。
 - 检测本机 Codex / Claude Code CLI；Codex 作为首发默认 adapter。
-- 通过实验性 Codex `app-server` 创建持久独立 thread，并原生注入项目内置 Skill 与 Bootstrap Packet。
+- 通过实验性 Codex `app-server` 创建持久独立 thread，并在 Bootstrap Packet/任务 Prompt 中引用随程序发布的协议文件；Codex 自己读取协议，不依赖全局 Skill 安装。
 - 创建只读 onboarding Task、Warm Session 和外部 thread / turn 关联，再打开 Codex Desktop。
 - 创建 Task，选择 Agent、workstream 和 auto / warm / disposable policy。
 - Dispatch 后生成并复制 Mission Packet。
@@ -681,7 +709,7 @@ v0.0.11 在本机 Codex Desktop 注册的 `codex://threads/<threadId>` 协议上
 - 顶栏和旧任务行提供“打开最近对话”：Harness 只读调用 Codex `thread/list`，按项目工作目录选择最近持久 thread 并尝试官方 deep link；没有候选或候选仍被 Harness app-server 占用时才回退项目入口，不把不确定的对话伪装成精确任务历史。
 - `project/list` / `project/create` 现在是 Project 创建的唯一正式路径；项目接入先创建或复用真实 Codex Project，再把 CTO、Review 和任务 thread 的 `projectId` 传入 `thread/start`，形成可在 Codex 侧管理的 2+N 对话结构。
 - 启动迁移会把旧 Harness 项目的本地 ID 升级为官方 Project ID，并为旧控制 Session 创建新的 Project 成员 thread；原有聊天历史只保留在 Codex 中，不删除、不覆盖。
-- Codex Desktop 的 legacy 本地 Project ID 是兼容缓存，不是官方 Project 的事实源。现代 Harness 默认不再整文件重写该缓存；`APH_ENABLE_CODEX_LEGACY_STATE_SYNC=1` 仅用于旧版本实验兼容。当前进程不会热加载外部新增 Project，侧栏可见性必须在完全退出 `ChatGPT.exe` 后冷启动逐项核对。
+- Codex Desktop 的 legacy 本地 Project ID 是兼容缓存，不是官方 Project 的事实源。现代 Harness 默认不再整文件重写该缓存；`APH_ENABLE_CODEX_LEGACY_STATE_SYNC=1` 仅用于旧版本实验兼容。删除 local Project 必须走 Desktop 进程内 `ProjectsManager.removeLocal` 等价实时控制面并回读验证；只改缓存、删目录或调用 app-server `project/delete` 都不能报告删除成功。没有实时控制面时清理器必须阻断并保留证据，不制造侧栏残影。
 - 5 秒 runtime 自动同步使用单次在途锁；所有 runtime 重绘保留任务/审核展开器、对话框值与选区、控件焦点以及三处滚动位置，不打断验收条件查看或表单编辑。
 - 错误以 JSONL 持久化到应用 userData 的 `logs/harness-errors.jsonl`，记录操作、失败阶段、原始堆栈、应用版本与最小上下文；1 MiB 轮转并保留 3 份归档。renderer 异常、未处理 Promise 和主进程未捕获异常进入同一日志。
 
@@ -691,7 +719,7 @@ v0.0.11 在本机 Codex Desktop 注册的 `codex://threads/<threadId>` 协议上
 
 Review 文件只包含当前候选和最近 checkpoint，长度有硬上限；Harness 在每次状态写入时按内容寻址重建，Review Agent 在后台审核并准备回写。普通任务仍等待用户明确接受后才推进 HEAD，只有显式 auto Section 或 Smoke 配置才自动推进，不要求用户手动压缩上下文。一次性任务的晚到 `turn/completed` 事件不会把已经自动接受的 Session 回退为“待回写”。
 
-`LIMITATION` v0.23 定义的主题驱动收集器尚未实现；当前 importer 仍以 Codex Project/cwd 关系为主要入口，不能视为满足“跨全部历史、消息级归类”的新协议。该切片也尚未实现 Claude Code/Hermes 公共后台 adapter（当前仅支持用户主动 Skill/MCP 交接）、Git commit-on-accept、GitHub 写操作、SQLite + CAS、正式安装器和 macOS。另已实现 transcript 内容寻址归档、最小 MCP/CLI 双向写回、GitHub 只读摘要、Project Ledger、Section 生命周期和项目包导入导出。Codex 运行态、完成/失败回写、Git 快照持久化和事件驱动的 renderer 更新已实现；界面以 5 秒有界心跳自动同步，并由 renderer 在输入、对话框、指针交互和展开器操作期间保护临时 UI 状态，另保留“刷新状态”手动入口。Codex 精确对话打开依赖 `codex://threads/<threadId>` 注册，失败时按项目 fallback；当前 portable EXE 未做代码签名，Codex app-server 仍是实验性接口；packaged 回归按用户边界使用纯代码集成模拟、headless renderer 与产物资源审计，不使用桌面自动化。
+`LIMITATION` 关键词搜索依赖 Codex app-server 的实验性版本能力；adapter 已隔离协议变化，并在能力缺失时回退有界本地索引，但回退不提供完整消息 occurrence 语义。该切片也尚未实现 Claude Code/Hermes 公共后台 adapter（当前仅支持用户主动 Skill/MCP 交接）、Git commit-on-accept、GitHub 写操作、SQLite + CAS、正式安装器和 macOS。已实现的是三种项目创建入口、用户明确选择对话的有限知识收集、关键词搜索与 occurrence 证据、transcript 内容寻址归档、最小 MCP/CLI 双向写回、GitHub 只读摘要、Project Ledger、Section 生命周期和项目包导入导出。Codex 运行态、完成/失败回写、Git 快照持久化和事件驱动的 renderer 更新已实现；界面以 5 秒有界心跳自动同步，并由 renderer 在输入、对话框、指针交互和展开器操作期间保护临时 UI 状态，另保留“刷新状态”手动入口。Codex 精确对话打开依赖 `codex://threads/<threadId>` 注册，失败时按项目 fallback；当前 portable EXE 未做代码签名，Codex app-server 仍是实验性接口；packaged 回归按用户边界使用纯代码集成模拟、headless renderer 与产物资源审计，不使用桌面自动化。
 
 ### 15.5 v0.19.0 状态层与交接切片
 
@@ -833,7 +861,7 @@ Review 文件只包含当前候选和最近 checkpoint，长度有硬上限；Ha
 | D-029 | DECIDED | 桌面首屏采用渐进披露；当前目标、用户审核和任务列表常驻，Git / Agent / Session 技术细节进入项目详情抽屉。酸绿只表示状态与主操作。 |
 | D-030 | SUPERSEDED | 早期统一“新增本地项目”入口只输入项目名；现已由 D-057 拆为空白创建与既有历史收集。Codex 仍是首发默认预连接 Agent。 |
 | D-031 | SUPERSEDED | 早期项目接入统一采用名称解析后创建 thread；空白创建现遵循 D-057，既有历史收集遵循 D-060 至 D-063。 |
-| D-032 | DECIDED | Harness Skill 随项目打包并在 `turn/start` 中显式注入，不要求用户全局安装。 |
+| D-032 | DECIDED | Harness 协议随程序打包；Prompt 只引用实时绝对路径，由 Codex 自己读取，不要求用户全局安装或 `turn/start` Skill 注入。 |
 | D-033 | SUPERSEDED | v0.14.0 的“结果仍需手动 JSON bridge”由 v0.15.0 的 Agent 事件监控与 fenced `harness-result` 自动审核回写替代；手动提交仍作为故障兜底。 |
 | D-034 | DECIDED | Codex `app-server` adapter 标记为 experimental，协议变化必须被隔离，不能把当前实测能力宣传成稳定厂商承诺。 |
 | D-035 | SUPERSEDED | 早期既有项目入口依赖项目名称近似解析；现行入口改为主题全文检索与候选簇审核，见 D-060。低置信和歧义仍禁止猜测。 |
@@ -858,42 +886,76 @@ Review 文件只包含当前候选和最近 checkpoint，长度有硬上限；Ha
 | D-054 | DECIDED | 现代 Codex 的官方 `project/list` / `project/create` 与 `thread/start(projectId)` 是 Project 事实源；SQLite/app-server 行存在不能代替 Desktop 侧栏可见性验收。 |
 | D-055 | DECIDED | `.codex-global-state.json` 只作为旧 Desktop 的兼容缓存；Harness 默认不写它，`APH_ENABLE_CODEX_LEGACY_STATE_SYNC=1` 才允许实验性兼容写入，并必须标注冷启动核对。 |
 | D-056 | DECIDED | 创建 Task 与 dispatch 是两个明确动作；创建只保存 `ready/run=null`，真正注入 Agent 后写入 `task.dispatched`，不以“任务已创建”冒充执行。 |
-| D-057 | DECIDED | “新建空白项目”和“从既有历史收集项目”是两个独立事务；前者不检索 Agent，后者不走空白项目 onboarding。 |
+| D-057 | SUPERSEDED | 旧版只区分“新建空白项目”和“从既有历史收集项目”；已由 D-064 的空白、关键词、手动选择三条真实用途入口替代。 |
 | D-058 | SUPERSEDED | 早期 Codex 导入以官方 Project ID 和关联线程索引为主要边界；现行主题驱动、消息级收集见 D-060 至 D-063，Project ID 只保留为关系信号。 |
 | D-059 | DECIDED | 控制 thread 必须有真实可读的侧栏历史：创建时执行一次有界 `turn/start`（当前模型最低稳定档为 `low`），控制线程级隔离已知故障 MCP；`thread/inject_items` 仅作历史补充，不替代首条用户 turn。 |
 | D-060 | DECIDED | 既有历史收集以用户主题为入口；项目边界由正文 occurrence 与 Project/Git/目录关系图共同确定，不要求精确对话名、Project ID 或仓库路径。 |
 | D-061 | DECIDED | Codex 0.154+ 优先使用 `thread/search` 与 `thread/searchOccurrences`；能力缺失时回退本地增量 SQLite FTS，所有厂商输出统一 occurrence schema。 |
 | D-062 | DECIDED | 归类最小单位是消息 occurrence；完整 rollout 只进入无损 Raw Archive，不因一条消息命中而把整个混合对话并入项目状态。 |
 | D-063 | DECIDED | 快速模式的检索阶段零模型 token，默认只对 20–40 个高价值 occurrence 执行一次有界整理；零结果或高歧义时才增加一次小型别名扩展 turn。 |
+| D-064 | DECIDED | 项目创建入口按真实用途拆成空白、关键词和手动选择三条路径：空白只创建官方 Project 与控制面并打开 CTO；关键词自动发现并整理；手动选择严格限制在勾选 thread。 |
+| D-065 | DECIDED | Codex 关键词搜索优先调用 `thread/search` 和 `thread/searchOccurrences`，同时检索活跃/归档；版本能力缺失时只允许有界本地索引回退，并把能力状态和 occurrence provenance 交给整理 Agent。 |
+| D-066 | DECIDED | 测试清理与生产状态分离：local Project 删除必须调用 Desktop 实时 `removeLocal` 等价桥接并验证项目、线程归属和回读状态；`.codex-global-state.json` 只能备份/审计，禁止作为删除写入目标。 |
 
 ## 20. 下一步
 
-桌面状态闭环与首发交接切片已经存在，但主题驱动收集器和真实 Codex Project 侧栏冷启动验收仍是开放门。下一阶段按顺序处理主题收集、兼容回退、持久层和跨平台：
+桌面状态闭环、三种创建入口和关键词收集切片已经存在；真实 Codex Project 侧栏冷启动验收、旧版本回退的 occurrence 精度和跨 Agent 搜索仍是开放门。下一阶段按顺序处理兼容回退、持久层和跨平台：
 
-1. 为 Codex adapter 实现 `thread/search` + `thread/searchOccurrences` 的活跃/归档并行检索、消息级 occurrence 和关系扩展。
-2. 保存 query profile、确认/排除关系和增量水位；实现旧 Codex 的本地增量 SQLite FTS 回退。
-3. 完成真实主题收集 Smoke：跨多个对话、一个混合项目对话、零结果、并列歧义和能力缺失；验证快速模式 token 与 evidence 上限。
-4. 完成一次完全退出 Codex Desktop 后的真实三 Project 侧栏核对，并为旧控制 thread 替换缺失 rollout；未完成前不得把旧项目显示为“已连接”。
-5. 将 JSON 状态索引迁移到 SQLite + CAS，同时保留当前原子 JSON/JSONL 的可回滚迁移。
-6. 为公共 adapter contract 增加 Claude/Hermes 的能力版本协商和真实用户主动接力验收。
-7. 验证 macOS 的命令发现、路径和 deep-link 边界，再评估 Linux；协议稳定后再决定正式安装器、代码签名、GitHub 写操作、工程谱系和团队协作。
+1. 保存 query profile、确认/排除关系和增量水位；把当前有界本地回退升级为增量 SQLite FTS。
+2. 完成真实关键词收集 Smoke：跨多个对话、混合项目对话、零结果、并列歧义和能力缺失；验证 occurrence 与 evidence 上限。
+3. 完成一次完全退出 Codex Desktop 后的真实三 Project 侧栏核对，并为旧控制 thread 替换缺失 rollout；未完成前不得把旧项目显示为“已连接”。
+4. 将 JSON 状态索引迁移到 SQLite + CAS，同时保留当前原子 JSON/JSONL 的可回滚迁移。
+5. 为公共 adapter contract 增加 Claude/Hermes 的能力版本协商和真实用户主动接力验收。
+6. 验证 macOS 的命令发现、路径和 deep-link 边界，再评估 Linux；协议稳定后再决定正式安装器、代码签名、GitHub 写操作、工程谱系和团队协作。
 
 ## 21. 变更记录
 
-### v0.23.0 — 2026-09-14（主题驱动项目收集）
+### v0.25.3 — 2026-10-10（归档隔离、任务 lease 与 Agent 回写）
 
-- 将既有项目入口从“按 Codex Project/对话索引拉取”升级为“主题输入 → 全文检索 → 关系扩展 → 消息级归类 → 有界 Agent 整理 → 用户审核后创建”。
-- Codex Project ID、标题、cwd、Git root 和 remote 降为关系证据；正式支持一个项目跨多个对话、一个对话混合多个项目。
+- 归档项目从主页隔离，项目工具提供归档列表和恢复入口；归档事务会把 Harness 持有的活动任务记为 `timed_out`。
+- 增加 24 小时真实运行 lease、启动恢复、runtime heartbeat 收口和 timed-out 重试历史。
+- 增加 MCP `report_task_status` 状态/心跳协议；正式候选仍只由 `harness-result` 生成。
+- 增加归档、lease 边界、晚到回写和 renderer 隔离测试。
+
+### v0.25.2 — 2026-10-08（三种项目创建入口与关键词搜索收口）
+
+- 固定三条入口契约：空白项目 = 官方 Project + CTO/Review 控制面并打开 CTO；关键词 = 原生搜索后自动整理；手动选择 = 严格固定来源范围。
+- 空白创建不再创建整理 session、不搜索历史、不启动整理 turn；三条入口统一使用创建进度弹窗，只有真实 Codex turn 才显示运行中。
+- Codex adapter 接入 `thread/search`、活跃/归档合并和 `thread/searchOccurrences`，能力缺失时回退有界本地索引；搜索命中和 occurrence 写入整理 provenance。
+- 白皮书、README 和项目指南同步三种入口的真实用途，移除“空白项目不连接 Codex”和“关键词搜索尚未实现”的过时表述。
+
+### v0.25.3 — 2026-10-08（侧栏清理改为实时控制面）
+
+- 修正测试清理根因：文件夹删除、app-server `project/delete` 和磁盘缓存改写不会移除 Desktop 内存中的 local Project。
+- 新增实时删除桥接契约与回读校验；没有 `ProjectsManager.removeLocal` 等价能力时输出 `SMOKE_BLOCKED`，保留状态快照和恢复证据，不再假报清理成功。
+
+### v0.25.1 — 2026-10-08（收敛对话整理与任务交接边界）
+
+- 将“普通开发任务的 Mission Packet”“对话整理指令”和“审核后写入项目的知识包”定义为三个不同对象。
+- 对话整理指令只携带选定对话范围、固定默认整理目标和用户追加要求；不得把它显示成普通任务包，也不得借相似标题、目录或 Project 关系扩张范围。
+- 整理结果继续通过 `harness-import` 候选审核门进入 Project Ledger、知识索引、动态白皮书和原始归档；未审核候选不改变项目真相。
+- 修正文档执行模式：本机 Codex Desktop 的可见交接是默认生产路径，managed app-server 仅保留给隔离 qualification。
+
+### v0.25.0 — 2026-10-07（恢复正式 Codex 执行入口）
+
+- 修正项目创建、既有对话整理和任务 dispatch 的 Codex adapter，隔离真实 app-server 与可见 Desktop 交接路径。
+- 保留 `APH_CODEX_EXECUTION_MODE=managed` 作为显式 qualification 开关；可见 Desktop 交接是用户生产路径。
+- 新增执行模式解析回归，未知模式安全回退到本机 Codex Desktop 可见交接；Smoke 使用的 fake Codex 仍只存在于隔离脚本，不进入 packaged 生产资源。
+
+### v0.23.0 — 2026-09-14（主题驱动项目收集，设计决定）
+
+- 提出将既有项目入口从“按 Codex Project/对话索引拉取”升级为“主题输入 → 全文检索 → 关系扩展 → 消息级归类 → 有界 Agent 整理 → 用户审核后创建”。该版本是设计决定，不代表当前代码已完成。
+- Codex Project ID、标题、cwd、Git root 和 remote 被定义为关系证据；“一个项目跨多个对话、一个对话混合多个项目”是目标能力，当前用户明确选择对话的入口只在选定范围内整理，不代表主题全文收集已经完成。
 - 本机 `codex-cli 0.154.0-alpha.6.2` 已只读验证 `thread/search` 与 `thread/searchOccurrences`；`thread/list.searchTerm` 仅搜标题。单关键词零召回实测同时证明必须保留查询扩展。
 - 定义 Codex 原生搜索优先、旧 Codex 增量 SQLite FTS 回退和跨 Agent 统一 occurrence schema。
 - 定义面向有限额度用户的快速模式：检索零模型 token，只对 20–40 个高价值 occurrence 做一次有界整理；完整 rollout 留在 Raw Archive。
-- 明确该收集器仍是已决定、待实现能力；当前 Project/cwd importer 不得冒充已经满足新协议。
+- 明确该收集器仍是已决定、待实现能力；当前 Project/cwd importer 和用户明确选择对话的收集路径都不得冒充已经满足主题全文收集协议。
 
 ### v0.22.0 — 2026-09-05（真实新建 Project 与控制面修复）
 
 - 真实面板新建 smoke 通过：输入项目名称和工作区后，Harness 调用 `codex://new`，等待官方 `project/list`，再以同一 `projectId` 创建 CTO 与 Review。
 - 控制 thread 改为一次低 effort 真实初始化 turn，并回读 `thread/turns/list`；线程级禁用 Telegram、image-tools、node_repl 只作用于控制面，避免可选 MCP handshake 失败阻断建项。
-- 已用真实 Codex Desktop `list_projects`/`list_threads` 回读到同一项目及两个控制对话；证据目录为 `E:\_iva_workspace\aph-real-connected-flow-20260905-0510`。
+- 已用真实 Codex Desktop `list_projects`/`list_threads` 回读到同一项目及两个控制对话；证据目录为 `<local-only-path>`。
 - 修正 `minimal` effort 与当前 `gpt-5.6-sol` 不兼容的问题；新增适配器回归和可重复 `smoke:codex-connected`。
 - 仍未宣称旧项目冷启动迁移和真实 IMPORT 候选审核完成；旧 rollout 与对话不删除。
 
@@ -901,7 +963,7 @@ Review 文件只包含当前候选和最近 checkpoint，长度有硬上限；Ha
 
 - 将项目入口拆成“新建空白项目”和“从 Codex 拉取项目”。空白项目不会搜索 Codex 或读取 Git，并可在契约中后绑定工作区；已有空白项目也可显式选择“从 Codex 回填到此项目”。
 - Codex 拉取只消费官方 `project/list`，支持错拼、缩写、省略分隔符、中文和受控语义别名；歧义/低置信拒绝猜测。本机只读实测 `个人网站`、`APH`、`local chat` 均定位到对应官方 Project。
-- 新增专用 `MODE: IMPORT` Agent 运行、`harness-import` schema、候选审核门和接受/重试/拒绝事务；未接受前不改任务、Section、CTO/Review、checkpoint、Git 或 GitHub。
+- 新增专用 `MODE: IMPORT` Agent 运行、`harness-import` schema、候选审核门和接受/重试/拒绝事务；这是历史协议，当前整理指令使用 `MODE: CONVERSATION_COLLECTION`，未接受前不改任务、Section、CTO/Review、checkpoint、Git 或 GitHub。
 - `thread/list` 仅用于建立高置信关联线程索引并按 `updatedAt` 排序；关联 rollout 以 SHA-256 内容寻址方式在模型上下文外流式归档，Agent 通过 `rolloutPath` 做定向读取，禁止按目录 mtime 或文件名日期推断进展。
 - 合并时重映射任务依赖和冲突 ID、绑定现有 CTO/Review 控制 Session、拒绝旧 source revision 回退 Git/GitHub；重复候选和重复导入不复制核心实体。
 - 源码全量 223/223、TypeScript/Vite 构建、真实 Electron + 隔离 app-server 导入 Smoke、最终 packaged import 和 portable 启动均通过；v0.0.19 成品为 90,851,869 bytes，SHA-256=`51E957DFB8441B64C3161FB87AA881056AD31D924CC508D9EFE7D5821CBB24CB`。本轮未启动真实用户 Project 的 import turn、未重启 Codex、未修改 Codex SQLite/global state。
@@ -974,15 +1036,15 @@ Review 文件只包含当前候选和最近 checkpoint，长度有硬上限；Ha
 
 ### v0.18.5 — 2026-09-03
 
-- 修复广域项目发现回归：Codex 存在近期 cwd 时仍会扫描有界默认根目录，因此“个人网站”可以从 `E:\_iva_workspace` 被定位，不再只看近期对话目录。
+- 修复广域项目发现回归：Codex 存在近期 cwd 时仍会扫描有界默认根目录，因此“个人网站”可以从 `<local-only-path>` 被定位，不再只看近期对话目录。
 - 默认根扫描与显式 `APH_PROJECT_ROOTS` / `APH_PROJECT_SCAN_ROOTS` 隔离；显式或临时测试根不会意外混入本机目录，歧义阈值和扫描深度保持不变。
-- 新增回归并用真实 Codex `thread/list` 复验：6 个近期 cwd 下“个人网站”稳定解析到 `E:\_iva_workspace\portfolio-layered-hero-2026-08-31`。
+- 新增回归并用真实 Codex `thread/list` 复验：6 个近期 cwd 下“个人网站”稳定解析到 `<local-only-path>`。
 
 ### v0.18.4 — 2026-09-03
 
 - 为旧数据盘项目增加启动时幂等修复：自动补齐缺失的 CTO 主 Session、Review 审核 Session，并在 Codex 全局状态中创建或复用同名项目文件夹。
 - 控制线程创建使用按项目/角色的并发锁，避免后台修复和用户点击“进入 CTO”重复创建线程；线程 ID、项目文件夹 ID 和分组关系均写回数据盘及 Codex 全局状态。
-- 使用真实数据盘 `E:\_Codex数据\AI-Project-Harness` 启动打包程序验证：`AI Project Harness` 与 `iva-local-chat` 两个旧项目均获得 CTO/Review thread，四个 thread 均已分配到对应 Codex 项目文件夹。
+- 使用真实数据盘 `<local-only-path>` 启动打包程序验证：`AI Project Harness` 与 `iva-local-chat` 两个旧项目均获得 CTO/Review thread，四个 thread 均已分配到对应 Codex 项目文件夹。
 - 重新打包并通过 `smoke:codex-packaged`、`smoke:packaged-ui`、`smoke:portable`；portable 成品为 90,791,746 bytes，SHA-256=`60F0C172971F3439AE3758FB950C961D1608EB631290C731AD40DEFDD4FA0557`。桌面快捷方式目标已核对为该 portable 成品。
 
 ### v0.18.3 — 2026-09-03
@@ -1071,7 +1133,7 @@ Review 文件只包含当前候选和最近 checkpoint，长度有硬上限；Ha
 - 桌面 MVP 升级为 v0.0.6，修复 packaged EXE 输入项目名后出现 `spawn ... codex.exe ENOENT` 与 `Error invoking remote method` 的故障。
 - 根因实证为 Codex EXE 存在且可运行，但 portable 主进程把 `resources/app.asar` 文件作为 app-server `cwd`；Windows 对无效工作目录返回 `ENOENT`。
 - packaged app-server 改用真实 `resources` 目录；内置 Skill 通过 electron-builder `extraResources` 放到 ASAR 外，外部 Codex 得到普通文件路径。
-- 项目接入抽成与 IPC 共用的可注入生产服务；代码级完整模拟验证 `Local Chat` → `iva-local-chat` Git 仓库 → onboarding Task/Warm Session → 持久 thread/turn → Skill 输入 → 状态落盘。
+- 项目接入抽成与 IPC 共用的生产服务；代码级完整模拟验证 `Local Chat` → `iva-local-chat` Git 仓库 → onboarding Task/Warm Session → 持久 thread/turn → 协议路径引用 → 状态落盘。
 - 四个失败边界覆盖 Codex 不可用、项目不存在、Skill 缺失和 app-server 失败；失败不伪装成功，Skill 缺失不创建 phantom project，协议失败保存为可重试任务。
 - Electron IPC 错误在 renderer 显示前净化，不再向用户暴露 remote method 名和内部包装；`spawn ... ENOENT` 转为可行动中文提示。
 - 全量自动化为 31 项，代码集成 Smoke 约 1 秒；验收禁止桌面自动化和低效率重复测试，固定为一条成功链路、四个机制不同的边界、全量回归与一次资源审计。
@@ -1096,7 +1158,7 @@ Review 文件只包含当前候选和最近 checkpoint，长度有硬上限；Ha
 
 ### v0.8.0 — 2026-09-02
 
-- 桌面 MVP 升级为 v0.0.5，修复输入 `Local Chat` 无法发现 `E:/Cloudflare/my-workflow/iva-local-chat` 的真实故障。
+- 桌面 MVP 升级为 v0.0.5，修复输入 `Local Chat` 无法发现 `<local-only-path>` 的真实故障。
 - 根因是 Codex 最近 cwd 只有父项目 `my-workflow`，v0.0.4 只扫描其同级目录，没有把父项目中的独立嵌套 Git 仓库加入候选；模糊评分本身无误。
 - 候选发现现在额外检查 Codex 已知项目和最近 Git 根的一层直接子目录，并且只接纳包含 `.git` 的仓库；普通文件夹和更深层目录不会被无界递归。
 - 新增真实目录形态的 RED → GREEN 回归、非 Git 子目录和递归深度边界；全量测试增至 20 项。
@@ -1114,8 +1176,8 @@ Review 文件只包含当前候选和最近 checkpoint，长度有硬上限；Ha
 
 - 桌面 MVP 升级为 v0.0.3；“接入项目”由文件夹选择改为只输入项目名。
 - Codex 成为首发默认 Agent；项目接入自动完成名称解析、Git 校验、独立持久 thread 创建、命名和 Desktop 打开。
-- 新增项目内置 `ai-project-harness` Skill，并通过 Codex `turn/start` 原生 Skill 输入与 Bootstrap Packet 同时注入；Onboarding 固定为只读和 candidate-result 边界。
-- 新增项目名歧义、路径拒绝、preload IPC、onboarding 复用和 Skill 注入测试；真实 app-server 已读取 15 个近期 cwd，并成功创建带 Skill 输入的独立 Codex thread。
+- 新增项目内置 `ai-project-harness` 任务协议与 `ai-project-harness-writeback` 回写协议；Prompt 只引用实时路径，Onboarding 固定为只读和 candidate-result 边界。
+- 新增项目名歧义、路径拒绝、preload IPC、onboarding 复用和协议路径引用测试；真实 app-server 不再收到 `type: "skill"` 输入。
 - 首屏仍只保留当前目标、审核和任务列表；接入 Dialog 仅一个输入框、一行 Codex 默认连接状态和一个主操作。
 - 明确 app-server 是 experimental；自动捕获 `harness-result` 与写入审核区仍是下一门槛，不伪装为已完成双向闭环。
 

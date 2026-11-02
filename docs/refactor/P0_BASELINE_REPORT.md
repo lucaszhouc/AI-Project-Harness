@@ -1,3 +1,7 @@
+> Historical material. Desktop-native repair is incomplete; see [current status](../CURRENT_REPAIR_STATUS.md). Older execution and PASS claims do not describe this source revision.
+
+> 当前状态：历史归档，仅保留当时的证据与决策。2026-10-24 起，运行时唯一有效路线是 Codex Desktop 原生深链/内置交接；本文中关于外部命令、后端协议或旧 smoke 的描述均不可作为实施指令。`DEPRECATED_HISTORICAL_RECORD`
+
 # P0 重构基线报告
 
 状态：COMPLETE（只读基线已固定；问题状态指 P0 修改前的工作树）

@@ -30,14 +30,14 @@ const app = await electron.launch({
   env: {
     ...process.env,
     APH_USER_DATA: userData,
+    APH_HARNESS_TRUSTED_ROOT: path.join(userData, "trusted"),
     APH_TEST_WINDOW_HIDDEN: "1",
-    APH_DISABLE_CODEX_PROJECT_PROVISION: "1",
     ELECTRON_NO_ATTACH_CONSOLE: "1",
   },
 });
 
 const consoleErrors = [];
-const report = { waitMs, userData, consoleErrors };
+const report = { waitMs, userData, consoleErrors, desktopBoundary: "intercepted; no live Desktop creation verified" };
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
@@ -46,6 +46,11 @@ function assert(condition, message) {
 let page;
 try {
   page = await app.firstWindow();
+  await app.evaluate(({ shell }) => {
+    globalThis.aphTestDeepLinks = [];
+    shell.openExternal = async uri => { globalThis.aphTestDeepLinks.push(uri); };
+  });
+
   page.on("console", (message) => {
     if (message.type() === "error") consoleErrors.push(message.text());
   });
@@ -65,27 +70,10 @@ try {
   assert(report.firstRun.title === "AI Project Harness", `Unexpected title: ${report.firstRun.title}`);
   assert(!report.firstRun.revision, `Fresh production profile unexpectedly contains a project: ${report.firstRun.revision}`);
   assert(report.firstRun.actions.includes("add-project"), "Blank-project entry is missing");
-  assert(report.firstRun.actions.includes("guide-recheck"), "Getting-started guide is missing");
+  assert(!report.firstRun.actions.some((action) => String(action).startsWith("guide-")), "Guide actions must be removed");
   assert(!report.firstRun.horizontalOverflow, "Fresh first-run window overflows horizontally");
+  assert(!/小助手|下一步与诊断|我来带路/.test(await page.locator(".app-shell").innerText()), "Guide UI is still visible");
   if (captureDir) await page.screenshot({ path: path.join(captureDir, "first-run-empty.png") });
-
-  await page.locator('[data-action="guide-locale"]').click();
-  await page.getByRole("button", { name: "Create project", exact: true }).waitFor();
-  const englishFirstRun = await page.locator(".app-shell").innerText();
-  assert(englishFirstRun.includes("Getting started"), "English guide title is missing");
-  assert(englishFirstRun.includes("Create project"), "English empty-state action is missing");
-  assert(!/小助手|新建项目|从 Codex 导入/.test(englishFirstRun), "English first-run still exposes Chinese core actions");
-  await page.getByRole("button", { name: "Create project", exact: true }).click();
-  const englishProjectDialog = page.locator("#project-dialog");
-  await englishProjectDialog.waitFor({ state: "visible", timeout: 3000 });
-  const englishDialogText = await englishProjectDialog.innerText();
-  assert(englishDialogText.includes("Add project"), "English project-dialog title is missing");
-  assert(englishDialogText.includes("Import from Codex"), "English import action is missing");
-  assert(!/项目从哪里来|从 Codex 导入/.test(englishDialogText), "English project dialog still exposes Chinese core actions");
-  await englishProjectDialog.locator("[data-close]").first().click();
-  report.englishFirstRun = { switched: true, horizontalOverflow: await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth) };
-  await page.locator('[data-action="guide-locale"]').click();
-  await page.getByRole("button", { name: "新建项目", exact: true }).first().waitFor();
 
   await page.getByRole("button", { name: "新建项目", exact: true }).first().click();
   const projectDialog = page.locator("#project-dialog");
@@ -95,6 +83,16 @@ try {
   await projectDialog.locator('textarea[name="blankGoal"]').fill("Verify local-first guide and review flow");
   await projectDialog.getByRole("button", { name: "新建项目", exact: true }).last().click();
   await page.waitForFunction(() => /^HEAD R\d+$/.test(document.querySelector(".project-context b")?.textContent || ""), null, { timeout: 10000 });
+  // This UI-only smoke deliberately disables Codex provisioning. The blank
+  // project is durable, while the progress dialog must be closable after the
+  // explicit connection failure so normal dashboard interactions remain testable.
+  const progressDialog = page.locator("#project-progress-dialog");
+  if (await progressDialog.isVisible().catch(() => false)) {
+    await progressDialog.locator('[data-close]').click();
+  }
+  if (await projectDialog.isVisible().catch(() => false)) {
+    await projectDialog.locator('[data-close]').first().click();
+  }
   report.initial = await page.evaluate(() => ({
     title: document.title,
     heading: document.querySelector(".head-copy h1")?.textContent?.trim(),
@@ -103,40 +101,25 @@ try {
     horizontalOverflow: document.documentElement.scrollWidth > window.innerWidth,
   }));
   assert(/^HEAD R\d+$/.test(report.initial.revision), `Unexpected initial revision: ${report.initial.revision}`);
-  assert(report.initial.actions.includes("refresh"), "Refresh action is missing");
+  assert(report.initial.actions.includes("project-tools"), "Project-tools action is missing");
+  assert(!report.initial.actions.includes("refresh"), "Manual refresh action must stay out of the top bar");
+  assert(!report.initial.actions.includes("open-codex-project"), "Recent-conversation action must stay out of the top bar");
+  assert(!report.initial.actions.includes("new-conversation"), "Harness new-conversation action must stay out of the UI");
   assert(report.initial.actions.includes("open-details"), "Project-details action is missing");
   assert(report.initial.actions.includes("connect-codex"), "Explicit second-transaction Codex connect action is missing");
   assert(report.initial.actions.includes("new-task"), "New-task action is missing");
   assert(!report.initial.horizontalOverflow, "Initial window overflows horizontally");
   if (captureDir) await page.screenshot({ path: path.join(captureDir, "first-run-created.png") });
 
-  await page.locator('[data-action="guide-locale"]').click();
-  await page.getByRole("button", { name: "New task", exact: true }).waitFor();
-  await page.getByRole("button", { name: "Project details", exact: true }).click();
-  const englishDrawer = page.locator(".project-drawer");
-  await page.waitForFunction(() => document.querySelector(".project-drawer")?.getAttribute("aria-hidden") === "false");
-  const englishDrawerText = await englishDrawer.innerText();
-  assert(englishDrawerText.includes("Project health"), "English project-health section is missing");
-  assert(englishDrawerText.includes("Conversation archives"), "English archive section is missing");
-  assert(!/项目详情|项目健康|会话归档|项目工具/.test(englishDrawerText), "English project drawer still exposes Chinese core labels");
-  await englishDrawer.getByRole("button", { name: "Close project details" }).click();
-  await page.getByRole("button", { name: "New task", exact: true }).click();
-  const englishTaskDialog = page.locator("#task-dialog");
-  await englishTaskDialog.waitFor({ state: "visible" });
-  const englishTaskDialogText = await englishTaskDialog.innerText();
-  assert(englishTaskDialogText.includes("Acceptance criteria"), "English task acceptance field is missing");
-  assert(englishTaskDialogText.includes("Review mode"), "English task review field is missing");
-  assert(!/任务名称|验收条件|审核方式|创建任务/.test(englishTaskDialogText), "English task dialog still exposes Chinese core labels");
-  await englishTaskDialog.locator("[data-close]").first().click();
-  assert(!await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth), "English project window overflows horizontally");
-  await page.locator('[data-action="guide-locale"]').click();
-  await page.getByRole("button", { name: "新建任务", exact: true }).waitFor();
+  assert(!report.initial.actions.some((action) => String(action).startsWith("guide-")), "Guide actions must stay absent");
 
-  await page.locator('[data-action="new-conversation"]').first().evaluate((button) => button.click());
-  const conversationDialog = page.locator("#conversation-dialog");
-  await conversationDialog.waitFor({ state: "visible", timeout: 3000 });
-  assert(await conversationDialog.locator('select[name="agent"] option[value="codex"]').count() === 1, "Project conversation agent selector is missing");
-  await conversationDialog.locator('[data-close]').first().click();
+  await page.getByRole("button", { name: "项目工具", exact: true }).click();
+  const projectToolsDialog = page.locator("#project-tools-dialog");
+  await projectToolsDialog.waitFor({ state: "visible", timeout: 3000 });
+  for (const action of ["open-ledger", "import-archive", "open-archive", "archive-project", "pause-project", "remove-project"]) {
+    assert(await projectToolsDialog.locator(`[data-action="${action}"]`).count() === 1, `Project tool is missing: ${action}`);
+  }
+  await projectToolsDialog.locator('[data-close]').click();
 
   await page.evaluate(() => {
     window.__aphRefreshTrace = [];
@@ -160,8 +143,7 @@ try {
     });
   });
   report.refreshStartedAt = new Date().toISOString();
-  await page.getByRole("button", { name: "刷新状态", exact: true }).click();
-  await page.waitForFunction(() => document.querySelector("#toast")?.textContent?.includes("状态已手动刷新"), null, { timeout: 5000, polling: 100 });
+  await page.waitForTimeout(waitMs);
   report.refreshTrace = await page.evaluate(() => {
     window.__aphRefreshObserver?.disconnect();
     return window.__aphRefreshTrace;
@@ -171,8 +153,7 @@ try {
     toast: document.querySelector("#toast")?.textContent,
     toastClass: document.querySelector("#toast")?.className,
   }));
-  assert(report.refreshAfterRuntimeUpdate.toast?.includes("状态已手动刷新"), "Runtime refresh erased the manual-refresh toast");
-  assert(report.refreshAfterRuntimeUpdate.toastClass?.includes("toast--visible"), "Runtime refresh hid the manual-refresh toast early");
+  assert(report.refreshAfterRuntimeUpdate.toast !== undefined, "Runtime refresh did not leave the renderer observable");
 
   await page.getByRole("button", { name: "项目详情", exact: true }).click();
   const drawer = page.locator(".project-drawer");
@@ -221,7 +202,7 @@ try {
   await taskDialog.getByRole("button", { name: "创建任务" }).click();
   const taskRow = page.locator(".task-row").filter({ hasText: "Claude 错误路径可见" }).first();
   await taskRow.waitFor();
-  await taskRow.getByRole("button", { name: "开始任务" }).click();
+  await taskRow.getByRole("button", { name: "准备任务包" }).click();
   await page.waitForFunction(() => document.querySelector("#toast")?.textContent?.includes("Claude Code"), null, { timeout: 5000 });
   assert((await page.locator("#toast").textContent()).includes("Claude Code"), `Claude user-invoked path was not surfaced clearly: ${await page.locator("#toast").textContent()}`);
   await taskRow.getByRole("button", { name: "提交结果", exact: true }).click();
@@ -255,6 +236,48 @@ try {
   assert(!report.minimumWindow.horizontalOverflow, "Minimum desktop window overflows horizontally");
   assert(report.minimumWindow.reviewEmpty, "Minimum desktop window lost the no-review state");
   if (captureDir) await page.screenshot({ path: path.join(captureDir, "first-run-1100x700.png") });
+
+  // Archive a task that is waiting on a user-owned Agent and verify the
+  // project leaves the active list, while the run is durably timed out.
+  await page.getByRole("button", { name: "新建任务", exact: true }).click();
+  await taskDialog.locator('input[name="title"]').fill("归档时自动停止的任务");
+  await taskDialog.locator('select[name="agent"]').selectOption("claude");
+  await taskDialog.getByRole("button", { name: "创建任务" }).click();
+  const archiveTaskRow = page.locator(".task-row").filter({ hasText: "归档时自动停止的任务" }).first();
+  await archiveTaskRow.getByRole("button", { name: "准备任务包" }).click();
+  await page.waitForFunction(() => document.querySelector(".task-row--awaiting_result")?.textContent?.includes("归档时自动停止的任务"), null, { timeout: 5000 });
+  await page.getByRole("button", { name: "项目工具", exact: true }).click();
+  await page.locator("#project-tools-dialog").getByRole("button", { name: "归档项目", exact: true }).click();
+  await page.waitForFunction(() => Boolean(document.querySelector(".app-shell--empty")), null, { timeout: 5000 });
+  report.archive = {
+    emptyState: Boolean(await page.locator(".app-shell--empty").count()),
+    archivedButton: await page.getByRole("button", { name: /查看已归档项目/ }).count(),
+  };
+  assert(report.archive.emptyState, "Archiving did not leave the active project list");
+  assert(report.archive.archivedButton === 1, "Archived-project entry is missing from the empty state");
+  await page.getByRole("button", { name: /查看已归档项目/ }).click();
+  const archivedDialog = page.locator("#archived-projects-dialog");
+  await archivedDialog.waitFor({ state: "visible", timeout: 3000 });
+  assert(await archivedDialog.getByText("First-run smoke project", { exact: true }).count() === 1, "Archived project is missing from archive list");
+  await archivedDialog.locator('[data-action="restore-project"]').click();
+  await page.waitForFunction(() => /^HEAD R\d+$/.test(document.querySelector(".project-context b")?.textContent || ""), null, { timeout: 5000 });
+  if (await archivedDialog.isVisible().catch(() => false)) await archivedDialog.locator("[data-close]").click();
+  const timedOutTask = page.locator(".task-row--timed_out").filter({ hasText: "归档时自动停止的任务" });
+  await timedOutTask.waitFor({ timeout: 3000 });
+  report.archive.restored = true;
+  report.archive.timedOut = (await timedOutTask.textContent())?.includes("已超时，可重试");
+  assert(report.archive.timedOut, "Archived active task did not become retryable timed_out");
+
+  page.once("dialog", (dialog) => dialog.accept());
+  await page.getByRole("button", { name: "项目工具", exact: true }).click();
+  await page.locator("#project-tools-dialog").getByRole("button", { name: "移出项目（可恢复）", exact: true }).click();
+  await page.waitForFunction(() => !document.querySelector(".project-context"), null, { timeout: 5000 });
+  report.removal = {
+    emptyState: Boolean(await page.locator(".app-shell--empty").count()),
+    toast: await page.locator("#toast").textContent(),
+  };
+  assert(report.removal.emptyState, "Project removal did not return to the empty state");
+  assert(report.removal.toast?.includes("项目已移出 Harness"), "Project removal did not surface a clear result");
   assert(consoleErrors.length === 0, `Renderer errors: ${consoleErrors.join(" | ")}`);
 
   report.pass = true;

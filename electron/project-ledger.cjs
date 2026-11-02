@@ -30,6 +30,8 @@ function buildProjectLedger(project, { git, github, generatedAt = new Date().toI
   const decisions = list(project.decisions, 16);
   const blockers = list(project.blockers, 12);
   const events = list(project.events, 20);
+  const rules = list((project.ruleCards || []).filter((item) => item.status === "active"), 20);
+  const playbooks = list((project.playbooks || []).filter((item) => item.status === "active"), 12);
   const lines = [
     `# ${clip(project.name, 200)} · 动态项目白皮书`,
     "",
@@ -54,6 +56,11 @@ function buildProjectLedger(project, { git, github, generatedAt = new Date().toI
     "## 技术栈与约束",
     ...(project.techStack?.length ? project.techStack.map((item) => `- 技术栈：${clip(item, 300)}`) : ["- 尚未登记技术栈。"]),
     ...(project.constraints?.length ? project.constraints.map((item) => `- 约束：${clip(item, 300)}`) : ["- 尚未登记额外约束。"]),
+    "",
+    "## 用户确认的规则与 Playbook",
+    ...(rules.length ? rules.map((item) => `- 规则「${clip(item.title, 240)}」· ${clip(item.scope, 60)} · ${clip(item.kind, 60)}：${clip(item.statement, 1000)}${item.rationale ? `（原因：${clip(item.rationale, 700)}）` : ""}`) : ["- 还没有用户确认的规则。"]),
+    ...(playbooks.length ? playbooks.flatMap((item) => [`- Playbook「${clip(item.title, 240)} v${Number(item.version || 1)}」· 触发：${clip(item.trigger, 700)}`, ...(item.steps || []).slice(0, 12).map((step) => `  ${Number(step.order || 1)}. ${clip(step.action, 800)}${step.validation ? `；验证：${clip(step.validation, 500)}` : ""}`)]) : ["- 还没有用户确认的 Playbook。"]),
+    project.knowledgeEvidence?.path ? `- 原话证据索引：${project.knowledgeEvidence.path} · sha256 ${clip(project.knowledgeEvidence.sha256, 20)}` : "- 原话证据索引：尚未生成。",
     "",
     "## 当前进展",
     ...(checkpoints.length ? checkpoints.map((item) => [

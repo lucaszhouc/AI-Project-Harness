@@ -130,6 +130,6 @@ test("legacy projects gain an explicit Codex sidebar verification state on load"
     fs.writeFileSync(statePath, `${JSON.stringify(first.state, null, 2)}\n`, "utf8");
     const reloaded = new HarnessStore(statePath, path.join(root, "project"));
     assert.equal(reloaded.state.projects[0].codexProjectSync.state, "desktop-restart-required");
-    assert.match(reloaded.state.projects[0].codexProjectSync.detail, /冷启动|完全退出/);
+    assert.match(reloaded.state.projects[0].codexProjectSync.detail, /现有窗口刷新|手动核对/);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });

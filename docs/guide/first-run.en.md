@@ -1,6 +1,8 @@
+> Historical material. Desktop-native repair is incomplete; see [current status](../CURRENT_REPAIR_STATUS.md). Older execution and PASS claims do not describe this source revision.
+
 # First run on Windows
 
-This guide is for the packaged portable EXE. You do not need the source tree, Node.js, npm, or a build environment merely to run Harness. The current Codex execution path separately requires a compatible Codex CLI.
+This guide is for the packaged portable EXE. You do not need the source tree, Node.js, npm, a build environment, or Codex CLI to run Harness. Codex integration uses the native Codex Desktop application only.
 
 ## 1. Verify the download
 
@@ -18,24 +20,24 @@ Double-click the verified EXE. The first screen shows the application version an
 
 Failure: record the version, hash, Windows version, exact message, and time. Do not download from another site.
 
-## 3. Create a blank project
+## 3. Choose a project entrance
 
-Open **Getting started** → **Create blank project**. Enter:
+Open **Add project** and choose one of **Create blank project**, **Keyword organize**, or **Select conversations**. For a blank project, enter:
 
 - Project name: `First evaluation project`
 - Goal: `Create one reviewable task`
 - Constraints: leave blank
 - Project directory: leave blank for now
 
-Select **Create local project**. Success means one project appears with source `blank` and an initial revision. This action does not probe Codex, scan a directory, or create a turn.
+Select **Create project**. The blank path creates the official Codex Project and control plane, then opens CTO without an organizer turn. The keyword and selected-conversation paths search or read only their declared sources and start one real organizer turn. All three choices switch immediately to the progress dialog; only a real `turn/start` with a bound thread/turn/process is shown as running.
 
 Failure: correct the highlighted field. A write failure must leave no half-created project and must preserve the form.
 
-## 4. Check and connect Codex (optional)
+## 4. Check Codex (needed for organizer entrances)
 
-Select **Check again** in the guide. `unknown` means not safely verified; it is not “missing.” If Codex is absent, use the [official Codex CLI instructions](https://developers.openai.com/codex/cli). Run `codex` and select **Sign in with ChatGPT**, or use another official sign-in method. Return to Harness and select **Check again**; saying “I installed it” does not unlock the connection.
+Start and sign in to Codex Desktop in its own UI. Harness never launches a command-line client or asks for credentials.
 
-Select **Connect Codex** only after reading the confirmation: this is a second transaction, may create/reuse a Codex Project and control conversations, and may use the configured account. Success displays connection evidence. Failure preserves the same local project and offers a retry/check-result path.
+For an existing local project, **Connect Codex** sends the native Desktop deep link and waits for sidebar evidence. If Desktop lacks the requested control surface, the operation is blocked and the same local project remains retryable.
 
 ## 5. Create, then dispatch, a task
 

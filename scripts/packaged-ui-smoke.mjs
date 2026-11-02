@@ -1,7 +1,8 @@
 import fs from "node:fs";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { execFileSync, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 
@@ -10,18 +11,38 @@ const { chromium } = require("playwright-core");
 const projectRoot = path.resolve(fileURLToPath(new URL("../", import.meta.url)));
 const executable = path.join(projectRoot, "release", "win-unpacked", "AI Project Harness.exe");
 if (!fs.existsSync(executable)) throw new Error(`Unpacked executable missing: ${executable}`);
-for (const bridge of ["harness-cli.mjs", "harness-mcp.mjs"]) {
-  const bridgePath = path.join(projectRoot, "release", "win-unpacked", "resources", "harness-runtime", "scripts", bridge);
-  if (!fs.existsSync(bridgePath)) throw new Error(`Packaged bridge missing: ${bridgePath}`);
+
+async function findFreePort() {
+  const server = net.createServer();
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const address = server.address();
+  const port = typeof address === "object" && address ? address.port : 0;
+  await new Promise((resolve) => server.close(resolve));
+  if (!port) throw new Error("Could not reserve a local packaged UI smoke port");
+  return port;
 }
 
-const port = 9237;
+const port = await findFreePort();
 const userData = fs.mkdtempSync(path.join(os.tmpdir(), "aph-packaged-ui-profile-"));
 const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), "aph-packaged-ui-data-"));
-const bridgeDataRoot = fs.mkdtempSync(path.join(os.tmpdir(), "aph-packaged-bridge-data-"));
-const packagedCliPath = path.join(projectRoot, "release", "win-unpacked", "resources", "harness-runtime", "scripts", "harness-cli.mjs");
-const bridgeList = JSON.parse(execFileSync(process.execPath, [packagedCliPath, "list"], { encoding: "utf8", env: { ...process.env, APH_DATA_ROOT: bridgeDataRoot } }));
-if (!Array.isArray(bridgeList) || !bridgeList.length) throw new Error("Packaged Harness CLI did not return a project list");
+fs.writeFileSync(path.join(dataRoot, "guide-state.json"), JSON.stringify({
+  schemaVersion: 1,
+  copyVersion: 1,
+  sessionId: "legacy-english-state",
+  locale: "en",
+  dismissed: false,
+  sequence: 1,
+  steps: {},
+  probes: {},
+  operations: {},
+  completionEvidence: [],
+  diagnostics: [],
+  createdAt: new Date().toISOString(),
+  updatedAt: new Date().toISOString(),
+}));
 const child = spawn(executable, [`--remote-debugging-port=${port}`, `--user-data-dir=${userData}`], {
   cwd: projectRoot,
   env: {
@@ -29,9 +50,6 @@ const child = spawn(executable, [`--remote-debugging-port=${port}`, `--user-data
     APH_USER_DATA: userData,
     APH_TEST_WINDOW_HIDDEN: "1",
     APH_DATA_ROOT: dataRoot,
-    APH_DISABLE_AGENT_LAUNCH: "1",
-    APH_DISABLE_CODEX_PROJECT_PROVISION: "1",
-    APH_DISABLE_DESKTOP_DEEPLINK: "1",
     ELECTRON_NO_ATTACH_CONSOLE: "1",
   },
   windowsHide: true,
@@ -61,9 +79,12 @@ try {
   const firstRun = await page.evaluate(() => ({
     revision: document.querySelector(".project-context b")?.textContent?.trim(),
     hasAddProject: Boolean(document.querySelector('[data-action="add-project"]')),
+    hasGuidePanel: Boolean(document.querySelector(".getting-started")),
+    hasGuideAction: Boolean(document.querySelector('[data-action^="guide-"]')),
+    chineseFirstRun: document.body.innerText.includes("新建项目"),
     overflow: document.documentElement.scrollWidth > window.innerWidth,
   }));
-  if (firstRun.revision || !firstRun.hasAddProject || firstRun.overflow) {
+  if (firstRun.revision || !firstRun.hasAddProject || firstRun.hasGuidePanel || firstRun.hasGuideAction || !firstRun.chineseFirstRun || firstRun.overflow) {
     throw new Error(`Packaged first-run contract failed: ${JSON.stringify(firstRun)}`);
   }
   await page.getByRole("button", { name: "新建项目", exact: true }).first().click();
@@ -74,6 +95,9 @@ try {
   await projectDialog.locator('textarea[name="blankGoal"]').fill("Verify packaged first-run UI");
   await projectDialog.getByRole("button", { name: "新建项目", exact: true }).last().click();
   await page.waitForFunction(() => /^HEAD R\d+$/.test(document.querySelector(".project-context b")?.textContent || ""), null, { timeout: 10000 });
+  const progressDialog = page.locator("#project-progress-dialog");
+  if (await progressDialog.isVisible().catch(() => false)) await progressDialog.locator('[data-close]').click();
+  if (await projectDialog.isVisible().catch(() => false)) await projectDialog.locator('[data-close]').first().click();
   const result = await page.evaluate(() => ({
     title: document.title,
     revision: document.querySelector(".project-context b")?.textContent?.trim(),

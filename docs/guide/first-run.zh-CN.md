@@ -1,6 +1,8 @@
+> Historical material. Desktop-native repair is incomplete; see [current status](../CURRENT_REPAIR_STATUS.md). Older execution and PASS claims do not describe this source revision.
+
 # Windows 第一次使用
 
-这份教程按“完全没用过”的情况来写。运行 Harness 本身不需要源码、Node.js 或 npm；只有连接和使用 Codex 时，才需要先安装 Codex CLI。
+这份教程按“完全没用过”的情况来写。运行 Harness 和连接 Codex Desktop 都不需要源码、Node.js、npm 或 Codex CLI。
 
 ## 1. 校验下载
 
@@ -24,24 +26,26 @@ Get-FileHash -Algorithm SHA256 .\AI-Project-Harness-<version>-portable.exe
 
 ## 3. 新建项目
 
-点击“小助手”→“新建项目”，填写：
+点击“添加项目”，选择入口后填写：
 
 - 项目名称：`我的第一个项目`
 - 目标：`创建一项可由我检查的任务`
 - 约束：留空
 - 项目目录：暂时留空
 
-点击“新建项目”。成功后，它会出现在左侧列表里。这一步只保存项目资料，不会连接 Codex，也不会读取代码或历史对话。
+选择“新建空白项目”并点击“新建项目”。成功后，它会出现在左侧列表里；Harness 会创建官方 Codex Project 和 CTO/Review 控制面，并打开 CTO，不会启动整理。
+
+如果选择“关键词整理”，输入项目关键词或简称，Harness 会搜索活跃/归档对话并启动真实整理 turn；如果选择“手动选对话”，先勾选固定来源，Codex 只能读取这些对话。两条整理入口都会先显示统一进度弹窗，候选完成后等待你审核。
 
 如果某个字段有问题，按红色提示修改即可。创建失败时，已经填写的内容应该还在。
 
-## 4. 检查并连接 Codex（可选）
+## 4. 检查 Codex（整理入口需要）
 
-点击小助手里的“再检查一下”。如果显示“还没检查”，只是尚未确认，不代表一定没安装。
+如果显示“还没检查”，只是尚未确认，不代表一定没安装。
 
-没有 Codex 时，按照 [Codex CLI 官方说明](https://developers.openai.com/codex/cli)安装。然后在终端运行 `codex`，选择 **Sign in with ChatGPT** 或其他官方登录方式。完成后回到 Harness，再检查一次。
+先在 Codex Desktop 自己的界面中启动并登录。Harness 不启动命令行客户端，也不索要账号信息。
 
-准备好后点击“连接 Codex”。Harness 会为当前项目准备必要的 Codex 项目和管理对话，这可能使用你的 Codex 额度。连接失败也不会删除刚才的新项目，你可以处理好问题后重试。
+准备好后回到 Harness。空白项目创建会发送原生 Desktop 深链；已有项目仍可使用“连接 Codex”重新发起注册。Desktop 没有对应原生能力时，Harness 会返回明确阻断状态并保留项目。
 
 ## 5. 创建任务，再明确开始
 

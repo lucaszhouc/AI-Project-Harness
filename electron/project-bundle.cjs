@@ -33,14 +33,15 @@ function exportProjectBundle(project, targetPath, options = {}) {
 }
 
 function validateBundle(bundle) {
-  if (!bundle || bundle.type !== "ai-project-harness-project" || bundle.version !== BUNDLE_VERSION || !bundle.project?.id || !bundle.project?.path) throw new Error("Invalid Harness project bundle");
+  if (!bundle || bundle.type !== "ai-project-harness-project" || bundle.version !== BUNDLE_VERSION || !bundle.project?.id) throw new Error("Invalid Harness project bundle");
   return bundle;
 }
 
 function importProjectBundle(state, bundle, { replace = false } = {}) {
   validateBundle(bundle);
   const incoming = sanitizedProject(bundle.project);
-  const existingIndex = state.projects.findIndex((project) => project.id === incoming.id || path.resolve(project.path).toLowerCase() === path.resolve(incoming.path).toLowerCase());
+  const incomingPath = String(incoming.path || "").trim();
+  const existingIndex = state.projects.findIndex((project) => project.id === incoming.id || (incomingPath && project.path && path.resolve(project.path).toLowerCase() === path.resolve(incomingPath).toLowerCase()));
   if (existingIndex >= 0 && !replace) {
     state.selectedProjectId = state.projects[existingIndex].id;
     return { project: state.projects[existingIndex], imported: false, reason: "already-exists" };

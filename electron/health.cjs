@@ -9,8 +9,12 @@ function projectHealth(project, { git, github, sqlite, fileSystem = fs } = {}) {
     git: Boolean(git?.available),
     github: github?.remote ? (github.detailsLoaded === false ? "remote-only" : "ok") : "none",
     sqlite: sqlite?.available === false ? "fallback-json" : "ok",
+    // Desktop 原生控制面 confirmation proves only the durable backend row. Until a
+    // live Desktop ProjectsManager bridge (or a user cold-start check) proves
+    // sidebar visibility, health must remain attention instead of claiming a
+    // visible Project.
     codexProject: project?.codexProjectId
-      ? (["app-server-confirmed", "desktop-registered"].includes(project.codexProjectSync?.state) ? project.codexProjectSync.state : false)
+      ? (project.codexProjectSync?.state === "desktop-registered" ? "desktop-registered" : false)
       : "none",
   };
   const failures = Object.entries(checks).filter(([, value]) => value === false).map(([key]) => key);

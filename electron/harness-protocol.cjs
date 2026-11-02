@@ -127,6 +127,19 @@ function buildProjectContext(project, { maxTasks = 20, maxCheckpoints = 8, maxEv
     })),
     decisions: (Array.isArray(project.decisions) ? project.decisions : []).slice(0, 20).map((item) => typeof item === "string" ? clip(item, 1200) : { id: clip(item?.id, 120), title: clip(item?.title || item?.summary || item?.detail, 1200), status: clip(item?.status, 80), rationale: clip(item?.rationale, 1600), source: clip(item?.source, 120), createdAt: clip(item?.createdAt, 80) }),
     blockers: (Array.isArray(project.blockers) ? project.blockers : []).slice(0, 20).map((item) => clip(item, 1000)),
+    knowledge: {
+      rules: (Array.isArray(project.ruleCards) ? project.ruleCards : []).filter((item) => item.status === "active").slice(0, 20).map((item) => ({
+        id: clip(item.id, 120), title: clip(item.title, 240), scope: clip(item.scope, 60), kind: clip(item.kind, 60),
+        statement: clip(item.statement, 1600), rationale: clip(item.rationale, 1600), trigger: clip(item.trigger, 1000),
+        sourceEvidenceIds: (Array.isArray(item.sources) ? item.sources : []).slice(0, 12).map((source) => clip(source?.evidenceId, 120)),
+      })),
+      playbooks: (Array.isArray(project.playbooks) ? project.playbooks : []).filter((item) => item.status === "active").slice(0, 12).map((item) => ({
+        id: clip(item.id, 120), title: clip(item.title, 240), version: Number(item.version || 1), scope: clip(item.scope, 60),
+        trigger: clip(item.trigger, 1200), purpose: clip(item.purpose, 1600),
+        steps: (Array.isArray(item.steps) ? item.steps : []).slice(0, 20).map((step) => ({ order: Number(step.order || 0), action: clip(step.action, 1200), validation: clip(step.validation, 1000), failure: clip(step.failure, 1000) })),
+      })),
+      evidenceIndex: project.knowledgeEvidence ? { path: clip(project.knowledgeEvidence.path, 1000), sha256: clip(project.knowledgeEvidence.sha256, 80) } : null,
+    },
     events: (Array.isArray(project.events) ? project.events : []).slice(0, Math.max(0, Math.min(100, Number(maxEvents) || 20))).map((item) => ({ id: clip(item?.id, 120), type: clip(item?.type, 120), at: clip(item?.at, 80), detail: clip(item?.detail, 1000) })),
     git: boundedGit(project.gitSnapshot),
     github: boundedGithub(project.githubSnapshot),

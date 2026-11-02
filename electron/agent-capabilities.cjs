@@ -4,8 +4,8 @@ const capabilityTemplates = {
   codex: {
     label: "Codex",
     default: true,
-    capabilities: ["discover", "project", "launch", "stream", "open-thread", "skill-injection", "result-parse"],
-    mode: "后台可用",
+    capabilities: ["project", "open-thread", "bundled-handoff-protocol", "result-parse"],
+    mode: "Desktop 原生交接；协议文件按 Prompt 路径读取；后台执行永久关闭",
     protocolVersion: "agent-adapter-v1",
   },
   claude: {

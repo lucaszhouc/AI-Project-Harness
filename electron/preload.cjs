@@ -7,10 +7,10 @@ contextBridge.exposeInMainWorld("harness", {
   createConnectedProject: (input) => ipcRenderer.invoke("project:create-connected", input),
   connectCodexProject: (projectId, input) => ipcRenderer.invoke("project:connect-codex", projectId, input),
   importCodexProject: (input) => ipcRenderer.invoke("project:import-codex", input),
-  guideProbe: (subject) => ipcRenderer.invoke("guide:probe", subject),
-  guideCancelProbe: (subject) => ipcRenderer.invoke("guide:cancel-probe", subject),
-  guideUpdate: (input) => ipcRenderer.invoke("guide:update", input),
-  guideOperation: (operationId) => ipcRenderer.invoke("guide:operation", operationId),
+  listCodexConversations: () => ipcRenderer.invoke("codex:list-conversations"),
+  importCodexConversations: (input) => ipcRenderer.invoke("project:import-codex-conversations", input),
+  acceptKnowledgeCandidate: (projectId, candidateId) => ipcRenderer.invoke("knowledge:accept", projectId, candidateId),
+  rejectKnowledgeCandidate: (projectId, candidateId, reason) => ipcRenderer.invoke("knowledge:reject", projectId, candidateId, reason),
   onProjectOnboardingProgress: (listener) => {
     const handler = (_event, progress) => listener(progress);
     ipcRenderer.on("project:onboarding-progress", handler);
@@ -30,6 +30,7 @@ contextBridge.exposeInMainWorld("harness", {
   reportRendererError: (details) => ipcRenderer.invoke("diagnostics:report-renderer-error", details),
   selectProject: (projectId) => ipcRenderer.invoke("project:select", projectId),
   createTask: (projectId, input) => ipcRenderer.invoke("task:create", projectId, input),
+  attachVisibleThread: (projectId, taskId, input) => ipcRenderer.invoke("task:attach-visible-thread", projectId, taskId, input),
   dispatchTask: (projectId, taskId) => ipcRenderer.invoke("task:dispatch", projectId, taskId),
   stopTask: (projectId, taskId) => ipcRenderer.invoke("task:stop", projectId, taskId),
   submitTaskResult: (projectId, taskId, result) => ipcRenderer.invoke("task:submit-result", projectId, taskId, result),
@@ -42,6 +43,7 @@ contextBridge.exposeInMainWorld("harness", {
   setGitRemote: (projectId, remoteUrl, name) => ipcRenderer.invoke("github:set-remote", projectId, remoteUrl, name),
   setProjectStatus: (projectId, status) => ipcRenderer.invoke("project:set-status", projectId, status),
   archiveProject: (projectId, reason) => ipcRenderer.invoke("project:archive", projectId, reason),
+  removeProject: (projectId, reason) => ipcRenderer.invoke("project:remove", projectId, reason),
   restoreProject: (projectId) => ipcRenderer.invoke("project:restore", projectId),
   updateProjectContract: (projectId, input) => ipcRenderer.invoke("project:update-contract", projectId, input),
   listTemplates: () => ipcRenderer.invoke("project:list-templates"),
@@ -70,6 +72,7 @@ contextBridge.exposeInMainWorld("harness", {
   openCodexProject: (projectId) => ipcRenderer.invoke("project:open-codex", projectId),
   syncCodexProject: (projectId) => ipcRenderer.invoke("project:sync-codex", projectId),
   openCto: (projectId) => ipcRenderer.invoke("project:open-cto", projectId),
+  attachControlThread: (projectId, role, input) => ipcRenderer.invoke("project:attach-control-thread", projectId, role, input),
   newProjectConversation: (projectId, input) => ipcRenderer.invoke("project:new-conversation", projectId, input),
   openProjectSession: (projectId, sessionId) => ipcRenderer.invoke("project:open-session", projectId, sessionId),
 });

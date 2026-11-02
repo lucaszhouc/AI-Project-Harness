@@ -97,7 +97,7 @@ const snapshot = {
     },
   },
   agents: {
-    codex: { installed: true, path: "C:\\fixture\\codex.exe" },
+    codex: { installed: false, path: "" },
     claude: { installed: false, path: "" },
   },
   platform: "win32",
@@ -163,7 +163,7 @@ try {
           taskId: "task-smoke",
           threadId: "thread-smoke",
           desktopOpened: false,
-          desktopError: "codex app exited (1)",
+          desktopError: "DESKTOP_NATIVE_UNAVAILABLE",
           desktopWarning: {
             message: "项目已经准备好，但 Codex 没有自动打开。你可以再试一次。",
             errorId: "APH-20260902-060000-open01",
@@ -249,8 +249,10 @@ try {
   await page.goto(targetUrl, { waitUntil: "domcontentloaded" });
   await page.locator(".app-shell").waitFor();
   if (captureDir) await page.screenshot({ path: path.join(captureDir, "01-dashboard.png") });
-  await page.getByRole("button", { name: "刷新状态", exact: true }).click();
-  await page.waitForFunction(() => window.__aphSmoke.refreshCalls === 1);
+  await page.getByRole("button", { name: "项目工具", exact: true }).click();
+  const projectToolsDialog = page.locator("#project-tools-dialog");
+  await projectToolsDialog.waitFor({ state: "visible" });
+  await projectToolsDialog.locator('[data-close]').click();
   await page.getByRole("button", { name: "添加项目", exact: true }).click();
   const dialog = page.locator("#project-dialog");
   const initialChoice = await dialog.evaluate((element) => ({
@@ -259,24 +261,22 @@ try {
   }));
   if (!initialChoice.disabled || initialChoice.submit !== "选择方式后继续") throw new Error(`Project source gate missing: ${JSON.stringify(initialChoice)}`);
   await dialog.locator('[data-action="select-project-mode"][data-mode="import"]').click();
-  await dialog.getByLabel("Codex 项目名称").fill("Local Chat");
+  await dialog.getByLabel("项目关键词或简称").fill("Local Chat");
   await dialog.getByRole("button", { name: "开始导入" }).click();
 
-  const starting = await dialog.evaluate((element) => ({
+  const progressDialog = page.locator("#project-progress-dialog");
+  await progressDialog.waitFor({ state: "visible" });
+  const starting = await progressDialog.evaluate((element) => ({
     open: element.hasAttribute("open"),
-    busy: element.querySelector("form")?.getAttribute("aria-busy"),
-    submit: element.querySelector('button[type="submit"]')?.textContent,
-    disabled: element.querySelector('button[type="submit"]')?.disabled,
-    value: element.querySelector('input[name="importName"]')?.value,
-    status: element.querySelector("#project-onboarding-status")?.textContent,
+    status: element.querySelector("#project-progress-status")?.textContent,
   }));
-  if (!starting.open || starting.busy !== "true" || !starting.disabled || starting.submit?.trim() !== "正在处理…") {
+  if (!starting.open || !starting.status?.includes("正在")) {
     throw new Error(`Loading state missing: ${JSON.stringify(starting)}`);
   }
   await page.evaluate(() => window.__aphSmoke.emitRuntime({ snapshot: window.__aphSmoke.snapshot, event: { type: "runtime.heartbeat" } }));
-  if (!await dialog.isVisible()) throw new Error("Runtime update closed the active onboarding dialog");
+  if (!await progressDialog.isVisible()) throw new Error("Runtime update closed the active progress dialog");
   await page.keyboard.press("Escape");
-  if (!await dialog.isVisible()) throw new Error("Busy onboarding dialog closed before the operation completed");
+  if (await progressDialog.isVisible()) throw new Error("Progress dialog did not support a non-cancelling close");
 
   await page.evaluate(() => window.__aphSmoke.emit({
     stage: "checking_git",
@@ -284,11 +284,12 @@ try {
     label: "正在检查 Git",
     detail: "Local Chat",
   }));
-  const progress = await dialog.evaluate((element) => ({
+  await progressDialog.waitFor({ state: "visible" });
+  const progress = await progressDialog.evaluate((element) => ({
     label: element.querySelector(".onboarding-feedback__heading strong")?.textContent,
     value: element.querySelector('[role="progressbar"]')?.getAttribute("aria-valuenow"),
   }));
-  if (progress.label !== "正在检查 Git" || progress.value !== "46") {
+  if (progress.label !== "正在检查 Git" || progress.value != null) {
     throw new Error(`Progress state incorrect: ${JSON.stringify(progress)}`);
   }
 
@@ -298,6 +299,8 @@ try {
   await dialog.locator('[role="alert"]').waitFor();
   const failed = await dialog.evaluate((element) => ({
     open: element.hasAttribute("open"),
+    mode: element.querySelector("form")?.dataset.mode,
+    panelMode: element.querySelector('input[name="importName"]')?.closest("[data-project-mode-panel]")?.getAttribute("data-project-mode-panel"),
     busy: element.querySelector("form")?.getAttribute("aria-busy"),
     value: element.querySelector('input[name="importName"]')?.value,
     inputDisabled: element.querySelector('input[name="importName"]')?.disabled,
@@ -565,6 +568,8 @@ try {
   await taskDialog.locator('[data-close]').first().click();
   await page.waitForFunction(() => document.querySelector(".project-context b")?.textContent === "HEAD R255");
 
+  const scrollSurface = await page.locator(".work-surface").elementHandle();
+  const scrollTopBeforeRefresh = await page.locator(".work-surface").evaluate(element => element.scrollTop);
   const scrollGuardSnapshot = await page.evaluate(() => {
     const next = structuredClone(window.__aphSmoke.snapshot);
     next.state.projects[0].revision = 256;
@@ -574,7 +579,9 @@ try {
     return next;
   });
   const duringScroll = await page.locator(".project-context b").textContent();
-  if (duringScroll?.trim() === "HEAD R256") throw new Error(`Runtime update interrupted active scrolling: ${scrollGuardSnapshot.state.projects[0].revision}`);
+  if (duringScroll?.trim() !== "HEAD R256") throw new Error(`Live status was deferred during scrolling: ${scrollGuardSnapshot.state.projects[0].revision}`);
+  if (!await page.evaluate(element => document.querySelector(".work-surface") === element, scrollSurface)) throw new Error("Runtime refresh replaced the active scroll surface");
+  if (await page.locator(".work-surface").evaluate(element => element.scrollTop) !== scrollTopBeforeRefresh) throw new Error("Runtime refresh moved the current scroll position");
   await page.waitForFunction(() => document.querySelector(".project-context b")?.textContent === "HEAD R256", undefined, { timeout: 1000 });
 
   const bootPage = await browser.newPage({ viewport: { width: 900, height: 640 } });

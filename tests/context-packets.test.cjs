@@ -18,6 +18,8 @@ test("CTO packet is a bounded project index with source, HEAD, sessions and refe
   project.goal = "长期项目目标";
   project.checkpoints.unshift({ revision: 4, summary: "已接受进展", nextStep: "规划下一任务", evidence: [{ type: "test", value: "npm test" }] });
   project.tasks.unshift(machine.createTask(state, project.id, { title: "下一项任务", criteria: "可验收" }));
+  project.ruleCards = [{ id: "rule-1", type: "rule", status: "active", kind: "must", scope: "project", title: "先测试", statement: "交付前必须测试。", sources: [] }];
+  project.playbooks = [{ id: "playbook-1", type: "playbook", status: "active", version: 1, scope: "project", title: "发布闭环", trigger: "发布新版", purpose: "可靠交付", steps: [{ order: 1, action: "运行 smoke", sources: [] }] }];
   const packet = buildCtoContextPacket(project);
   assert.ok(packet.length <= CTO_MAX_CHARS);
   assert.match(packet, /由 AI Project Harness 自举接入/);
@@ -25,6 +27,9 @@ test("CTO packet is a bounded project index with source, HEAD, sessions and refe
   assert.match(packet, /下一项任务/);
   assert.match(packet, /CTO · 项目核心/);
   assert.match(packet, /项目目录：/);
+  assert.match(packet, /用户规则与 Playbook/);
+  assert.match(packet, /交付前必须测试/);
+  assert.match(packet, /发布闭环/);
 });
 
 test("Review packet stays bounded and contains only active candidate evidence", () => {
@@ -37,12 +42,15 @@ test("Review packet stays bounded and contains only active candidate evidence", 
     acceptance: [{ criterion: "通过", status: "pass" }],
     evidence: [{ type: "log", value: "y".repeat(20000) }],
   });
+  project.knowledgeCandidates = [{ id: "rule-pending", type: "rule", status: "pending", title: "截图必须交付", scope: "project", kind: "must", statement: "完成后展示截图。", sources: [{ evidenceId: "u1", quote: "截图不知道发。", role: "user" }] }];
   const packet = buildReviewContextPacket(project);
   assert.ok(packet.length <= REVIEW_MAX_CHARS);
   assert.match(packet, /Review Agent/);
   assert.match(packet, /审核候选/);
   assert.ok(!packet.includes("x".repeat(20000)));
   assert.ok(!packet.includes("y".repeat(20000)));
+  assert.match(packet, /待审核知识候选/);
+  assert.match(packet, /截图不知道发/);
 });
 
 test("store writes CTO and Review packet files atomically beside durable state", () => {

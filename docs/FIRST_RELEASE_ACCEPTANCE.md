@@ -1,3 +1,5 @@
+> Historical material. Desktop-native repair is incomplete; see [current status](CURRENT_REPAIR_STATUS.md). Older execution and PASS claims do not describe this source revision.
+
 # First Release Acceptance
 
 `npm run check:release` is the source-runtime gate. `npm run qualify:release` is the release-candidate gate: it installs the lockfile dependencies, runs the source gate and release contracts, builds the Windows portable artifact, audits the packaged contents, and exercises the packaged UI, Electron workflow, missing-Codex path, portable persistence, and packaged Codex read-only adapter.

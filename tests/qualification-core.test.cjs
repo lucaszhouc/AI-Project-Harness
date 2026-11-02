@@ -52,6 +52,40 @@ test("package audit detects secret-shaped text and development-machine paths", a
   );
 });
 
+test("packaging gate rejects partial real-chain evidence before electron-builder", async () => {
+  const { validateReleaseEvidence } = await import("../scripts/prepackage-gate.mjs");
+  const base = {
+    pass: true,
+    sidebarVisible: true,
+    fullChainStatus: "PASS",
+    chainPass: true,
+    taskWritebackPass: true,
+    verifiedAt: "2026-10-24T03:00:00.000Z",
+    officialProjectId: "project-1",
+    importThreadId: "thread-import",
+    trustedRoot: "C:\\fixture\\app",
+    projectPath: "C:\\fixture\\app\\harness-projects\\demo",
+    controlThreadIds: ["thread-cto", "thread-review"],
+  };
+  assert.equal(validateReleaseEvidence(base), base);
+  assert.throws(
+    () => validateReleaseEvidence({ ...base, chainPass: false }),
+    /Desktop 原生任务闭环与回写证据未通过/,
+  );
+  assert.throws(
+    () => validateReleaseEvidence({ ...base, fullChainStatus: "PARTIAL_BLOCKED" }),
+    /Desktop 原生任务闭环与回写证据未通过/,
+  );
+  assert.throws(
+    () => validateReleaseEvidence({ ...base, taskWritebackPass: false }),
+    /Desktop 原生任务闭环与回写证据未通过/,
+  );
+  assert.throws(
+    () => validateReleaseEvidence({ ...base, sidebarVisible: false }),
+    /侧栏验收证据必须同时包含/,
+  );
+});
+
 test("Windows qualification invokes npm through Node instead of spawning npm.cmd", async () => {
   const { resolveStepInvocation } = await import("../scripts/qualification-core.mjs");
   const invocation = resolveStepInvocation(

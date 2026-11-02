@@ -40,12 +40,17 @@ test("preload exposes project-name onboarding through the dedicated IPC channel"
   assert.deepEqual(invocations.at(-1), ["project:create-connected", { name: "连接项目" }]);
   await exposed.importCodexProject({ codexProjectId: "codex-42", name: "远端" });
   assert.deepEqual(invocations.at(-1), ["project:import-codex", { codexProjectId: "codex-42", name: "远端" }]);
-  await exposed.guideProbe("codex-cli");
-  assert.deepEqual(invocations.at(-1), ["guide:probe", "codex-cli"]);
-  await exposed.guideCancelProbe("codex-cli");
-  assert.deepEqual(invocations.at(-1), ["guide:cancel-probe", "codex-cli"]);
-  await exposed.guideUpdate({ dismissed: true });
-  assert.deepEqual(invocations.at(-1), ["guide:update", { dismissed: true }]);
+  await exposed.listCodexConversations();
+  assert.deepEqual(invocations.at(-1), ["codex:list-conversations"]);
+  await exposed.importCodexConversations({ name: "组合项目", threadIds: ["thread-1", "thread-2"] });
+  assert.deepEqual(invocations.at(-1), ["project:import-codex-conversations", { name: "组合项目", threadIds: ["thread-1", "thread-2"] }]);
+  await exposed.acceptKnowledgeCandidate("project-1", "rule-1");
+  assert.deepEqual(invocations.at(-1), ["knowledge:accept", "project-1", "rule-1"]);
+  await exposed.rejectKnowledgeCandidate("project-1", "rule-2", "只适用于一次任务");
+  assert.deepEqual(invocations.at(-1), ["knowledge:reject", "project-1", "rule-2", "只适用于一次任务"]);
+  assert.equal(exposed.guideProbe, undefined);
+  assert.equal(exposed.guideCancelProbe, undefined);
+  assert.equal(exposed.guideUpdate, undefined);
   await exposed.connectCodexProject("project-1", { operationId: "op-1" });
   assert.deepEqual(invocations.at(-1), ["project:connect-codex", "project-1", { operationId: "op-1" }]);
   await exposed.showErrorLog();
@@ -114,6 +119,8 @@ test("preload exposes removable Agent runtime updates and conversation opening",
   assert.deepEqual(invocations.at(-1), ["project:open-codex", "project-1"]);
   await exposed.openCto("project-1");
   assert.deepEqual(invocations.at(-1), ["project:open-cto", "project-1"]);
+  await exposed.attachControlThread("project-1", "review", { threadId: "thread-review", externalProjectId: "codex-project-1" });
+  assert.deepEqual(invocations.at(-1), ["project:attach-control-thread", "project-1", "review", { threadId: "thread-review", externalProjectId: "codex-project-1" }]);
   await exposed.refreshGitHub("project-1");
   assert.deepEqual(invocations.at(-1), ["github:refresh", "project-1"]);
   await exposed.createSection("project-1", { name: "前端" });
@@ -124,6 +131,8 @@ test("preload exposes removable Agent runtime updates and conversation opening",
   assert.deepEqual(invocations.at(-1), ["task:create", "project-1", { title: "依赖任务", dependsOn: ["task-0"] }]);
   await exposed.openLedger("project-1");
   assert.deepEqual(invocations.at(-1), ["project:open-ledger", "project-1"]);
+  await exposed.removeProject("project-1", "测试移出");
+  assert.deepEqual(invocations.at(-1), ["project:remove", "project-1", "测试移出"]);
 });
 
 test("preload exposes removable archive progress subscription", () => {

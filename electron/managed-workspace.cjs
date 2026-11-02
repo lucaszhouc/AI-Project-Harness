@@ -16,10 +16,13 @@ function safeWorkspaceSlug(name) {
   return slug;
 }
 
-function createManagedWorkspace({ dataRoot, name, fileSystem = fs } = {}) {
-  const root = path.resolve(String(dataRoot || ""));
+function createManagedWorkspace({ dataRoot, name, trustedRoot, fileSystem = fs } = {}) {
+  const root = path.resolve(String(trustedRoot || dataRoot || ""));
   if (!root || root === path.parse(root).root) throw new Error("Harness dataRoot is required");
-  const workspaceRoot = path.join(root, "workspaces");
+  // Keep generated projects in the visible, bundled folder next to the
+  // Harness executable.  The program folder itself is the single trust
+  // boundary, so child projects do not need a second trust prompt.
+  const workspaceRoot = trustedRoot ? path.join(root, "harness-projects") : path.join(root, "workspaces");
   fileSystem.mkdirSync(workspaceRoot, { recursive: true });
   const slug = safeWorkspaceSlug(name);
   for (let index = 1; index <= 10000; index += 1) {

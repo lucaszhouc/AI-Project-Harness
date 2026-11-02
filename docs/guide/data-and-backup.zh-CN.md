@@ -1,3 +1,5 @@
+> Historical material. Desktop-native repair is incomplete; see [current status](../CURRENT_REPAIR_STATUS.md). Older execution and PASS claims do not describe this source revision.
+
 # 数据与备份
 
 Harness 会把项目状态、运行记录、错误日志和会话归档保存在本机用户数据目录中。自动测试使用独立目录，不会拿你的真实项目做测试。

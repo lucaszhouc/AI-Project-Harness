@@ -93,6 +93,38 @@ test("task dependencies block dispatch until prerequisite is accepted", () => {
   assert.doesNotThrow(() => machine.dispatchTask(state, project.id, dependent.id));
 });
 
+test("Agent status reports validate run identity, are idempotent, and do not finish a task", () => {
+  const state = machine.createInitialState("C:\\fixture\\status-report");
+  const project = state.projects[0];
+  project.tasks = [];
+  const task = machine.createTask(state, project.id, { title: "状态回写" });
+  machine.dispatchTask(state, project.id, task.id);
+  const runId = task.run.id;
+  assert.throws(() => machine.reportTaskStatus(state, project.id, task.id, { runId: "wrong", state: "running" }), /RUN_MISMATCH/);
+  machine.reportTaskStatus(state, project.id, task.id, { runId, state: "running", phase: "working", detail: "开始", progress: 12 });
+  const before = task.status;
+  machine.reportTaskStatus(state, project.id, task.id, { runId, state: "completed", phase: "reporting", detail: "Agent 声称完成", progress: 100 });
+  assert.equal(before, "in_progress");
+  assert.equal(task.status, "in_progress");
+  assert.equal(task.run.reportedStatus, "completed");
+  assert.equal(task.run.phase, "reporting");
+  assert.equal(task.run.progress, 100);
+});
+
+test("late status report for a timed-out run is rejected", () => {
+  const state = machine.createInitialState("C:\\fixture\\late-report");
+  const project = state.projects[0];
+  project.tasks = [];
+  const task = machine.createTask(state, project.id, { title: "超时回写" });
+  machine.dispatchTask(state, project.id, task.id);
+  task.run.status = "running";
+  task.run.externalThreadId = "thread-late";
+  task.run.externalTurnId = "turn-late";
+  task.run.leaseStartedAt = "2026-10-01T00:00:00.000Z";
+  machine.expireTaskLeases(state, Date.parse("2026-10-02T00:00:00.000Z"));
+  assert.throws(() => machine.reportTaskStatus(state, project.id, task.id, { runId: task.run.id, state: "heartbeat" }), /RUN_TERMINAL/);
+});
+
 test("Codex Project sync state keeps official creation separate from sidebar visibility", () => {
   const state = machine.createInitialState("C:\\fixture");
   const project = state.projects[0];
@@ -103,7 +135,7 @@ test("Codex Project sync state keeps official creation separate from sidebar vis
   });
   assert.equal(first.state, "desktop-restart-required");
   assert.equal(first.officialProjectId, "official-project-1");
-  assert.match(first.detail, /完全退出/);
+  assert.match(first.detail, /现有窗口刷新|手动核对/);
   const timestamp = first.checkedAt;
   const second = machine.setCodexProjectSync(state, project.id, {
     officialProjectId: project.codexProjectId,
@@ -164,6 +196,80 @@ test("Claude and Hermes tasks use a user-invoked run without PTY automation", ()
   assert.equal(result.task.status, "awaiting_result");
   assert.equal(result.task.run.status, "awaiting_user");
   assert.equal(result.task.run.userActionRequired, true);
+});
+
+test("a visible Codex thread can be attached before the user sends its first turn", () => {
+  const state = machine.createInitialState("C:\\work\\visible-codex");
+  const project = state.projects[0];
+  project.tasks = [];
+  const task = machine.createTask(state, project.id, { title: "可见 Codex 任务", agent: "codex" });
+  machine.prepareUserAgentTask(state, project.id, task.id);
+  machine.attachUserInvokedThread(state, project.id, task.id, { threadId: "visible-thread", projectId: "codex-project-1", userPrompt: "真实任务提示词" });
+  assert.equal(task.status, "awaiting_result");
+  assert.equal(task.run.status, "awaiting_user");
+  assert.equal(task.run.userActionRequired, true);
+  assert.equal(task.run.externalThreadId, "visible-thread");
+  assert.equal(task.run.externalProjectId, "codex-project-1");
+  assert.equal(task.run.userPrompt, "真实任务提示词");
+});
+
+test("standard control deep-link request stays pending until a real Desktop thread is attached", () => {
+  const state = machine.createInitialState("C:\\work\\control-request");
+  const project = state.projects[0];
+  const review = project.sessions.find((session) => session.role === "review");
+  assert.ok(review);
+  assert.equal(review.externalThreadStatus, undefined);
+
+  machine.markControlSessionRequested(state, project.id, "review", "C:\\context\\review.md");
+  assert.equal(review.externalThreadStatus, "pending");
+  assert.equal(review.externalThreadId, undefined);
+  assert.equal(review.pendingDraftPath, "C:\\context\\review.md");
+  assert.match(project.events[0].type, /^control-session\.review\.requested$/);
+
+  machine.attachControlSessionThread(state, project.id, "review", {
+    threadId: "desktop-thread-review",
+    projectId: "desktop-project-1",
+    packetPath: "C:\\context\\review.md",
+  });
+  assert.equal(review.externalThreadStatus, "bound");
+  assert.equal(review.externalThreadId, "desktop-thread-review");
+  assert.equal(review.externalProjectId, "desktop-project-1");
+  assert.equal(review.lastOpenRequestedAt, undefined);
+  assert.match(project.events[0].type, /^control-session\.review\.attached$/);
+});
+
+test("standard control attach rejects a missing thread id and keeps a ready binding idempotent", () => {
+  const state = machine.createInitialState("C:\\work\\control-boundary");
+  const project = state.projects[0];
+  assert.throws(() => machine.attachControlSessionThread(state, project.id, "cto", {}), /threadId is required/);
+  const first = machine.attachControlSessionThread(state, project.id, "cto", { threadId: "desktop-thread-cto" });
+  const attachedAt = first.lastBoundAt;
+  const second = machine.attachControlSessionThread(state, project.id, "cto", { threadId: "desktop-thread-cto" });
+  assert.equal(second.externalThreadId, "desktop-thread-cto");
+  assert.notEqual(second.lastBoundAt, undefined);
+  assert.notEqual(attachedAt, undefined);
+  assert.equal(project.events.filter((event) => event.type === "control-session.cto.attached").length, 1);
+  assert.throws(() => machine.attachControlSessionThread(state, project.id, "cto", { threadId: "desktop-thread-other" }), /CONTROL_THREAD_REBIND_REQUIRED/);
+  machine.markControlSessionRequested(state, project.id, "cto");
+  assert.equal(second.externalThreadStatus, "bound");
+});
+
+test("failed visible thread materialization clears the awaiting-user phantom run and stays retryable", () => {
+  const state = machine.createInitialState("C:\\work\\visible-codex-failure");
+  const project = state.projects[0];
+  project.tasks = [];
+  const task = machine.createTask(state, project.id, { title: "可见 Codex 创建失败", agent: "codex" });
+  machine.prepareUserAgentTask(state, project.id, task.id);
+  assert.equal(task.status, "awaiting_result");
+  assert.equal(task.run.status, "awaiting_user");
+
+  machine.markExternalLaunchFailed(state, project.id, task.id, "thread/start: fixed smoke resource guard");
+
+  assert.equal(task.status, "ready");
+  assert.equal(task.run, undefined);
+  assert.match(task.launchError, /fixed smoke resource guard/);
+  assert.equal(project.sessions.find((session) => session.id === task.sessionId)?.status, "retired");
+  assert.equal(project.events[0].type, "codex.thread.failed");
 });
 
 test("running task can be stopped and its reusable section returns to idle", () => {

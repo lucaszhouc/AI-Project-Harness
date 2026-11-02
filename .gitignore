@@ -4,3 +4,12 @@ release/
 qa/
 .aph-user-data/
 *.log
+harness-projects/*
+!harness-projects/.gitkeep
+
+# Local repair archives and private control endpoints
+_eliminated/
+.aph-progress/
+mcp-control.json
+.env
+.env.*

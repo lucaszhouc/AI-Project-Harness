@@ -1,43 +1,65 @@
 export type AgentId = "codex" | "claude" | "hermes";
 export type SessionPolicy = "auto" | "warm" | "disposable";
-export type TaskStatus = "backlog" | "ready" | "in_progress" | "awaiting_result" | "review" | "changes_requested" | "accepted" | "failed";
+export type TaskStatus = "backlog" | "ready" | "in_progress" | "awaiting_user" | "awaiting_result" | "review" | "changes_requested" | "accepted" | "failed" | "timed_out";
 export type SectionKind = "main" | "reusable" | "one-shot";
 export type SectionStatus = "idle" | "running" | "awaiting_approval" | "closed" | "archived";
-export type CodexProjectSyncState = "not-created" | "app-server-confirmed" | "desktop-registered" | "desktop-restart-required";
-export type ProbeStatus = "unknown" | "checking" | "ok" | "missing" | "unauth" | "unsupported" | "error" | "stale";
-export type GuideStepStatus = "idle" | "guiding" | "waiting_user" | "running" | "verifying" | "blocked" | "completed" | "dismissed";
-
-export interface CapabilityProbe {
-  id: string;
-  subject: string;
-  status: ProbeStatus;
-  checkedAt?: string;
-  expiresAt?: string;
-  capabilityVersion?: string;
-  safeSummary: string;
-  errorCode?: string;
-  remediationActionIds: string[];
-  evidenceRef?: string;
-}
-
-export interface GuideState {
-  schemaVersion: number;
-  copyVersion: number;
-  sessionId: string;
-  locale: "zh-CN" | "en";
-  dismissed: boolean;
-  sequence: number;
-  activeProjectId?: string;
-  steps: Record<string, { id: string; status: GuideStepStatus; updatedAt: string }>;
-  probes: Record<string, CapabilityProbe>;
-  operations: Record<string, Record<string, unknown>>;
-  completionEvidence: Array<Record<string, unknown>>;
-}
-
+export type CodexProjectSyncState = "not-created" | "desktop-registered" | "desktop-restart-required";
 export interface Evidence {
   type: string;
   value: string;
 }
+
+export interface KnowledgeSource {
+  evidenceId: string;
+  quote: string;
+  role?: "user" | "assistant" | "action" | "unknown";
+  threadId?: string;
+  turnId?: string;
+}
+
+export interface KnowledgeRule {
+  id: string;
+  type: "rule";
+  status: "pending" | "accepted" | "rejected" | "active";
+  title: string;
+  scope: "task" | "project" | "domain" | "global";
+  kind: "must" | "must_not" | "prefer" | "exception";
+  statement: string;
+  rationale?: string;
+  trigger?: string;
+  exceptions?: string[];
+  confidence?: "low" | "medium" | "high";
+  sources: KnowledgeSource[];
+  rejectionReason?: string;
+}
+
+export interface PlaybookStep {
+  order: number;
+  action: string;
+  validation?: string;
+  failure?: string;
+  sources: KnowledgeSource[];
+}
+
+export interface KnowledgePlaybook {
+  id: string;
+  type: "playbook";
+  status: "pending" | "accepted" | "rejected" | "active";
+  version: number;
+  title: string;
+  scope: "task" | "project" | "domain" | "global";
+  trigger: string;
+  purpose: string;
+  prerequisites?: string[];
+  prohibitions?: string[];
+  exceptions?: string[];
+  confidence?: "low" | "medium" | "high";
+  steps: PlaybookStep[];
+  sources?: KnowledgeSource[];
+  rejectionReason?: string;
+}
+
+export type KnowledgeCandidate = KnowledgeRule | KnowledgePlaybook;
 
 export interface CandidateResult {
   summary: string;
@@ -64,6 +86,8 @@ export interface Task {
   priority?: "low" | "normal" | "high" | "urgent";
   dependsOn?: string[];
   sessionId?: string;
+  /** Previous terminal runs retained when a timed-out/failed task is retried. */
+  runHistory?: Array<Record<string, unknown>>;
   acceptedAt?: string;
   launchError?: string;
   run?: {
@@ -72,7 +96,12 @@ export interface Task {
     baseRevision: number;
     contractRevision?: number;
     startedAt: string;
-    status?: "starting" | "running" | "imported" | "completed" | "awaiting_review" | "awaiting_user" | "failed";
+    leaseStartedAt?: string;
+    timeoutAt?: string;
+    timeoutReason?: string;
+    reportedStatus?: string;
+    reportedAt?: string;
+    status?: "starting" | "running" | "imported" | "completed" | "awaiting_review" | "awaiting_user" | "failed" | "timed_out" | "disconnected";
     phase?: string;
     progress?: number;
     processId?: number;
@@ -90,6 +119,8 @@ export interface Task {
     externalProjectId?: string;
     desktopOpened?: boolean;
     userActionRequired?: boolean;
+    /** Exact prompt prepared for a visible Codex handoff; survives clipboard changes. */
+    userPrompt?: string;
     transcriptPath?: string;
     transcriptBytes?: number;
     archiveManifestId?: string;
@@ -104,7 +135,9 @@ export interface Task {
   importAppliedAt?: string;
   review?: {
     status: "queued" | "approved" | "changes_requested" | "inconclusive" | "legacy_unverified";
-    agent: AgentId;
+    agent: AgentId | "rule-checker" | "user";
+    rulesPassed?: boolean;
+    evidenceVerified?: boolean;
     sessionId?: string;
     queuedAt?: string;
     reviewedAt?: string;
@@ -130,7 +163,11 @@ export interface Session {
   createdAt: string;
   externalThreadId?: string;
   externalProjectId?: string;
+  externalThreadStatus?: "pending" | "bound" | "ready" | "failed";
+  externalThreadError?: string;
   lastReviewedAt?: string;
+  lastOpenRequestedAt?: string;
+  lastBoundAt?: string;
   lastOpenedAt?: string;
   pendingDraftPath?: string;
   lastUsedAt?: string;
@@ -191,7 +228,7 @@ export interface Project {
   source?: { kind: string; label: string };
   /** How this project entered Harness; blank projects have no external data. */
   codexImport?: {
-    status: "queued" | "running" | "awaiting_review" | "completed" | "failed";
+    status: "queued" | "preparing" | "running" | "awaiting_review" | "completed" | "failed";
     codexProjectId: string;
     requestedAt: string;
     taskId?: string;
@@ -199,9 +236,11 @@ export interface Project {
     startedAt?: string;
     candidateAt?: string;
     candidateHash?: string;
+    /** Content-addressed identity of the manually checked source set. */
+    selectionKey?: string;
     sourceName?: string;
     sourceRoots?: string[];
-    sourceThreads?: Array<{ id: string; name?: string; updatedAt?: number | string; recencyAt?: number | string; match?: string; score?: number }>;
+    sourceThreads?: Array<{ id: string; name?: string; updatedAt?: number | string; recencyAt?: number | string; match?: string; score?: number; searchSnippet?: string; matchedTerms?: string[]; archived?: boolean }>;
     sourceThreadCount?: number;
     archiveStatus?: "running" | "completed" | "partial";
     archivedThreadCount?: number;
@@ -215,6 +254,7 @@ export interface Project {
     failedAt?: string;
     detail?: string;
     error?: string;
+    search?: { supported?: boolean; fallback?: boolean; occurrenceSupported?: boolean; terms?: string[]; occurrenceCount?: number; occurrences?: Array<Record<string, unknown>>; errors?: Array<Record<string, unknown>> };
   };
   techStack?: string[];
   profile?: { root: string; stack: string[]; markers: string[]; scripts: string[]; entrypoints: string[]; packageManager?: string; inspectedAt: string };
@@ -223,6 +263,10 @@ export interface Project {
   archive?: { archivedAt: string; reason: string };
   ledger?: { path: string; manifestPath?: string; hash: string; chars: number; revision: number; generatedAt: string };
   archiveManifests?: Array<Record<string, unknown>>;
+  knowledgeEvidence?: { path: string; sha256: string; bytes: number; userEvidenceCount: number; agentEvidenceCount: number; actionCount: number; episodeCount: number; failureCount?: number; indexedThreadCount?: number; selectedThreadCount?: number };
+  knowledgeCandidates?: KnowledgeCandidate[];
+  ruleCards?: KnowledgeRule[];
+  playbooks?: KnowledgePlaybook[];
   githubSnapshot?: GitHubState;
   blockers?: string[];
   decisions?: Array<string | { id?: string; title?: string; summary?: string; detail?: string; status?: string; rationale?: string; source?: string; createdAt?: string }>;
@@ -231,7 +275,6 @@ export interface Project {
   codexProjectSync?: {
     state: CodexProjectSyncState;
     officialProjectId?: string;
-    legacyProjectId?: string;
     checkedAt: string;
     detail?: string;
   };
@@ -296,9 +339,7 @@ export interface Snapshot {
   agents: Record<AgentId, { installed: boolean; path: string; label?: string; mode?: string; capabilities?: string[]; bridge?: string }>;
   platform: string;
   platformCapabilities?: { platform: string; label: string; commandShim: boolean; deepLink: boolean; portable: boolean; status: string };
-  guide?: GuideState;
-  guideRecommendation?: { stepId: string; status: string; actionId: string; guideTarget: string; reasonKey: string; blocking: boolean; projectId?: string; taskId?: string };
-  storage?: { root: string; statePath: string; journalPath: string; archiveRoot?: string; sqlitePath?: string; sqlite?: { available: boolean; path?: string; projects?: number; tasks?: number; checkpoints?: number; events?: number; error?: string }; harnessCliPath?: string; harnessMcpPath?: string };
+  storage?: { root: string; statePath: string; journalPath: string; archiveRoot?: string; sqlitePath?: string; sqlite?: { available: boolean; path?: string; projects?: number; tasks?: number; checkpoints?: number; events?: number; error?: string } };
 }
 
 export interface HarnessApi {
@@ -316,20 +357,20 @@ export interface HarnessApi {
     matchedProjectName: string;
     match: { query: string; score: number; kind: string };
   }>;
-  createBlankProject(input: { name: string; path?: string; goal?: string; objective?: string; techStack?: string[]; constraints?: string[]; operationId?: string; targetFingerprint?: string; confirmedAt?: string } | string): Promise<{ projectId: string; snapshot: Snapshot }>;
+  createBlankProject(input: { name: string; path?: string; goal?: string; objective?: string; techStack?: string[]; constraints?: string[]; operationId?: string; targetFingerprint?: string; confirmedAt?: string } | string): Promise<{ projectId: string; codexProjectId?: string; ctoThreadId?: string; desktopOpened?: boolean; blankOnly?: boolean; initializationRequired?: boolean; snapshot: Snapshot }>;
   createConnectedProject(input: { name: string; path?: string; goal?: string; objective?: string; techStack?: string[]; constraints?: string[] } | string): Promise<{ projectId: string; snapshot: Snapshot; codexProjectId?: string; controlThreadCount?: number }>;
-  connectCodexProject(projectId: string, input?: { operationId?: string; targetFingerprint?: string; confirmedAt?: string; path?: string }): Promise<{ projectId: string; snapshot: Snapshot; codexProjectId?: string; desktopOpened?: boolean }>;
-  importCodexProject(input: { name?: string; projectName?: string; codexProjectId?: string; targetProjectId?: string; harnessProjectId?: string; path?: string; root?: string }): Promise<{ projectId: string; taskId: string; threadId?: string; reused: boolean; status: string; matchedProjectName?: string; match?: { query: string; score: number; kind: string; matchedName?: string }; desktopOpened: boolean; desktopError?: string; desktopProjectRestartRequired?: boolean; snapshot: Snapshot }>;
-  guideProbe(subject: string): Promise<{ probe: CapabilityProbe; snapshot: Snapshot }>;
-  guideCancelProbe(subject: string): Promise<{ subject: string; cancelled: boolean }>;
-  guideUpdate(input: { locale?: "zh-CN" | "en"; dismissed?: boolean; activeProjectId?: string | null }): Promise<Snapshot>;
-  guideOperation(operationId: string): Promise<Record<string, unknown> | undefined>;
-  onProjectOnboardingProgress(listener: (progress: { stage: string; progress: number; label: string; detail?: string }) => void): () => void;
+  connectCodexProject(projectId: string, input?: { operationId?: string; targetFingerprint?: string; confirmedAt?: string; path?: string }): Promise<{ projectId: string; snapshot: Snapshot; codexProjectId?: string; desktopOpened?: boolean; initializationRequired?: boolean }>;
+  importCodexProject(input: { name?: string; projectName?: string; codexProjectId?: string; targetProjectId?: string; harnessProjectId?: string; path?: string; root?: string }): Promise<{ projectId: string; taskId: string; threadId?: string; reused: boolean; status: string; userActionRequired?: boolean; executionOwner?: string; conversationPrompt?: string; navigation?: { opened?: boolean; capability?: string; requestAccepted?: boolean; verified?: boolean; error?: string }; matchedProjectName?: string; match?: { query: string; score: number; kind: string; matchedName?: string }; desktopOpened: boolean; desktopError?: string; desktopProjectRestartRequired?: boolean; snapshot: Snapshot }>;
+  listCodexConversations(): Promise<import("./conversation-picker.mjs").CodexConversationIndex>;
+  importCodexConversations(input: { name: string; goal?: string; threadIds: string[]; targetProjectId?: string }): Promise<{ projectId: string; taskId: string; threadId?: string; reused: boolean; status: string; userActionRequired?: boolean; executionOwner?: string; conversationPrompt?: string; navigation?: { opened?: boolean; capability?: string; requestAccepted?: boolean; verified?: boolean; error?: string }; selectedThreadCount: number; desktopOpened: boolean; desktopError?: string; snapshot: Snapshot }>;
+  acceptKnowledgeCandidate(projectId: string, candidateId: string): Promise<Snapshot>;
+  rejectKnowledgeCandidate(projectId: string, candidateId: string, reason?: string): Promise<Snapshot>;
+  onProjectOnboardingProgress(listener: (progress: { stage: string; progress?: number; label: string; detail?: string }) => void): () => void;
   showErrorLog(): Promise<{ opened: boolean; path: string }>;
   reportRendererError(details: { message: string; stack?: string; stage: string }): Promise<{ errorId: string }>;
   selectProject(projectId: string): Promise<Snapshot>;
   createTask(projectId: string, input: Record<string, unknown>): Promise<Snapshot>;
-  dispatchTask(projectId: string, taskId: string): Promise<{ snapshot: Snapshot; missionPacket?: string; userActionRequired?: boolean; agent?: AgentId }>;
+  dispatchTask(projectId: string, taskId: string): Promise<{ snapshot: Snapshot; missionPacket?: string; userActionRequired?: boolean; agent?: AgentId; threadId?: string; navigation?: { opened?: boolean; capability?: string; requestAccepted?: boolean; verified?: boolean; error?: string } }>;
   stopTask(projectId: string, taskId: string): Promise<Snapshot>;
   submitTaskResult(projectId: string, taskId: string, result: CandidateResult): Promise<Snapshot>;
   acceptTaskResult(projectId: string, taskId: string): Promise<Snapshot>;
@@ -341,6 +382,7 @@ export interface HarnessApi {
   setGitRemote(projectId: string, remoteUrl: string, name?: string): Promise<{ remote: { name: string; url: string }; snapshot: Snapshot }>;
   setProjectStatus(projectId: string, status: string): Promise<Snapshot>;
   archiveProject(projectId: string, reason?: string): Promise<Snapshot>;
+  removeProject(projectId: string, reason?: string): Promise<{ removedProjectId: string; archivePath: string; snapshot: Snapshot }>;
   restoreProject(projectId: string): Promise<Snapshot>;
   updateProjectContract(projectId: string, input: Record<string, unknown>): Promise<Snapshot>;
   listTemplates(): Promise<Array<{ id: string; label: string; goal: string; techStack: string[]; constraints: string[]; tasks: string[] }>>;
@@ -397,6 +439,7 @@ export interface HarnessApi {
     snapshot: Snapshot;
     error?: string;
   }>;
+  attachControlThread(projectId: string, role: "cto" | "review", input: { threadId: string; externalProjectId?: string; codexProjectId?: string; packetPath?: string; expectedThreadId?: string }): Promise<{ attached: boolean; verified: boolean; role: "cto" | "review"; threadId: string; snapshot: Snapshot }>;
   onAgentRuntimeUpdate(listener: (update: { snapshot: Snapshot; event?: { type?: string; detail?: string } }) => void): () => void;
   onArchiveProgress(listener: (progress: { projectId: string; bytes: number; maxBytes?: number; source?: string; done?: boolean }) => void): () => void;
 }

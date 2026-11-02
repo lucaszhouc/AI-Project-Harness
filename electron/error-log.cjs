@@ -57,7 +57,7 @@ function createErrorLog({
     fs.renameSync(filePath, `${filePath}.1`);
   }
 
-  function capture(error, { operation = "unknown", stage = "unknown", context } = {}) {
+  function capture(error, { operation = "unknown", stage = "unknown", severity = "error", context } = {}) {
     const occurredAt = now();
     const normalized = normalizeError(error);
     const record = {
@@ -65,6 +65,7 @@ function createErrorLog({
       id: formatErrorId(occurredAt, randomId()),
       operation,
       stage,
+      severity: ["error", "warning", "info"].includes(String(severity)) ? String(severity) : "error",
       message: normalized.message,
       stack: normalized.stack,
       appVersion,

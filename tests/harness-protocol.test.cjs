@@ -23,6 +23,18 @@ test("protocol context redacts credential-shaped strings while raw archive remai
   assert.match(context.project.goal, /已脱敏/);
 });
 
+test("protocol context includes accepted knowledge but excludes pending candidates", () => {
+  const state = machine.createInitialState("C:\\work\\knowledge-context");
+  const project = state.projects[0];
+  project.ruleCards = [{ id: "rule-active", type: "rule", status: "active", kind: "must", scope: "project", title: "先测试", statement: "交付前必须测试。", sources: [] }];
+  project.playbooks = [{ id: "playbook-active", type: "playbook", status: "active", version: 1, scope: "project", title: "发布闭环", trigger: "发布新版", purpose: "交付可靠版本", steps: [{ order: 1, action: "运行 smoke", validation: "PASS", sources: [] }] }];
+  project.knowledgeCandidates = [{ id: "rule-pending", type: "rule", status: "pending", kind: "must", scope: "project", title: "未经审核", statement: "不能进入上下文", sources: [] }];
+  const context = protocol.buildProjectContext(project);
+  assert.equal(context.knowledge.rules[0].statement, "交付前必须测试。");
+  assert.equal(context.knowledge.playbooks[0].steps[0].action, "运行 smoke");
+  assert.doesNotMatch(JSON.stringify(context), /不能进入上下文/);
+});
+
 test("protocol context bounds GitHub, Git and event payloads", () => {
   const state = machine.createInitialState("C:\\work\\protocol-bounds");
   const project = state.projects[0];

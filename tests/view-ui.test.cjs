@@ -12,9 +12,7 @@ function loadViewModule() {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
   }).outputText;
   const module = { exports: {} };
-  const localRequire = (specifier) => ["./guide-view.mjs", "./app-copy.mjs"].includes(specifier)
-    ? require(path.join(__dirname, "..", "src", specifier.slice(2)))
-    : require(specifier);
+  const localRequire = (specifier) => require(specifier);
   vm.runInNewContext(output, { exports: module.exports, module, require: localRequire, console }, { filename: sourcePath });
   return module.exports;
 }
@@ -143,7 +141,7 @@ function fixture(codexInstalled = true) {
       state: "desktop-restart-required",
       officialProjectId: "official-project-ui",
       checkedAt: "2026-09-04T00:00:00.000Z",
-      detail: "请完全退出 Codex Desktop 后重新打开，再核对侧栏。",
+      detail: "请在现有 Codex Desktop 窗口刷新或手动核对侧栏。",
     },
   };
   return {
@@ -151,7 +149,7 @@ function fixture(codexInstalled = true) {
     git: { [projectId]: { available: false, checkedAt: "2026-09-04T00:00:00.000Z" } },
     github: {},
     agents: {
-      codex: { installed: codexInstalled, path: codexInstalled ? "C:\\fixture\\codex.exe" : "" },
+      codex: { installed: false, path: "" },
       claude: { installed: false, path: "" },
       hermes: { installed: true, path: "C:\\fixture\\hermes.exe" },
     },
@@ -176,7 +174,7 @@ test("renderer exposes Hermes Sections, task reassignment, and dependency choice
   assert.match(html, /<span class="session-agent">Hermes<\/span>/);
   assert.doesNotMatch(html, /<option value="section-closed">/);
   assert.doesNotMatch(html, /<option value="section-main">/);
-  assert.match(html, /官方 Project 已创建 · 待冷启动核对/);
+  assert.match(html, /官方 Project 已创建 · 侧栏待核对/);
   const codexState = fixture(true);
   codexState.state.projects[0].tasks.unshift({
     id: "task-codex-ready",
@@ -190,8 +188,8 @@ test("renderer exposes Hermes Sections, task reassignment, and dependency choice
     createdAt: "2026-09-04T00:00:00.000Z",
   });
   const codexHtml = renderApp(codexState);
-  assert.match(codexHtml, /开始任务（注入 Codex）/);
-  assert.match(codexHtml, /title="开始任务后注入 Codex"/);
+  assert.match(codexHtml, /准备原生 Codex 任务/);
+  assert.match(codexHtml, /不会创建隐藏执行器/);
 });
 
 test("unrecoverable state is shown as an explicit safe recovery mode", () => {
@@ -242,67 +240,118 @@ test("task session copy describes logical workstream reuse instead of provider-t
   assert.match(html, /研究接力<\/span><span>复用工作流<\/span>/);
 });
 
-test("project onboarding clearly separates blank creation from Codex project import", () => {
+test("project onboarding separates blank, whole-project, and checkbox conversation import", () => {
   const { renderApp } = loadViewModule();
   const html = renderApp(fixture(true));
 
   assert.match(html, /id="project-dialog"/);
   assert.match(html, /data-action="select-project-mode" data-mode="blank"/);
   assert.match(html, /data-action="select-project-mode" data-mode="import"/);
+  assert.match(html, /data-action="select-project-mode" data-mode="threads"/);
   assert.match(html, /新建项目/);
-  assert.match(html, /不会连接 Codex，也不会读取代码或历史记录/);
-  assert.match(html, /从 Codex 导入/);
-  assert.match(html, /只会读取你选中的项目/);
+  assert.match(html, /通过 Desktop 原生深链注册 Project/);
+  assert.match(html, /关键词整理/);
+  assert.match(html, /固定你勾选的对话范围/);
+  assert.match(html, /手动选对话/);
+  assert.match(html, /id="codex-conversation-picker"/);
+  assert.match(html, /name="threadsName"/);
+  assert.match(html, /直接勾选多个对话/);
   assert.doesNotMatch(html, /独立事务|已登记|Project \/ cwd|Agent turn|按标题猜测/);
   assert.match(html, /name="entryMode"/);
   assert.match(html, /选择一种方式后继续/);
   assert.match(html, /type="submit" class="action action--accept" disabled>选择方式后继续/);
 });
 
+test("knowledge candidates render as source-linked rule and Playbook reviews", () => {
+  const { renderApp } = loadViewModule();
+  const snapshot = fixture(true);
+  snapshot.state.projects[0].knowledgeCandidates = [
+    {
+      id: "rule-1", type: "rule", status: "pending", title: "交付前必须测试", scope: "project", kind: "must",
+      statement: "功能更新交付前必须运行打包后测试。", rationale: "源码测试不能证明 EXE 可用。",
+      sources: [{ evidenceId: "u1", quote: "测试完的测试结果也要发。", role: "user", threadId: "thread-1", turnId: "turn-1" }],
+    },
+    {
+      id: "playbook-1", type: "playbook", status: "pending", title: "桌面新版交付", scope: "project", trigger: "完成桌面功能更新", purpose: "交付用户可打开的新版",
+      steps: [{ order: 1, action: "递增版本并打包", validation: "EXE 版本一致", sources: [{ evidenceId: "u2", quote: "版本不知道更新。", role: "user" }] }],
+    },
+  ];
+  const html = renderApp(snapshot);
+  assert.match(html, /用户规则候选/);
+  assert.match(html, /功能更新交付前必须运行打包后测试/);
+  assert.match(html, /测试完的测试结果也要发/);
+  assert.match(html, /Playbook 候选/);
+  assert.match(html, /递增版本并打包/);
+  assert.match(html, /data-action="accept-knowledge" data-knowledge="rule-1"/);
+  assert.match(html, /data-action="reject-knowledge" data-knowledge="playbook-1"/);
+});
+
+test("accepted rules and Playbooks remain visible in project details", () => {
+  const { renderApp } = loadViewModule();
+  const snapshot = fixture(true);
+  snapshot.state.projects[0].ruleCards = [{ id: "rule-active", type: "rule", status: "active", title: "先打包后验收", scope: "project", kind: "must", statement: "必须验证最终 EXE。", sources: [] }];
+  snapshot.state.projects[0].playbooks = [{ id: "playbook-active", type: "playbook", status: "active", version: 3, title: "桌面发布闭环", scope: "project", trigger: "发布新版", purpose: "可靠交付", steps: [{ order: 1, action: "运行 portable smoke", sources: [] }] }];
+  const html = renderApp(snapshot);
+  assert.match(html, /规则与 Playbook/);
+  assert.match(html, /先打包后验收/);
+  assert.match(html, /必须验证最终 EXE/);
+  assert.match(html, /桌面发布闭环/);
+  assert.match(html, /v3/);
+});
+
 test("renderer does not claim a Codex connection when Codex is unavailable", () => {
   const { renderApp } = loadViewModule();
   const html = renderApp(fixture(false));
   assert.match(html, /没有检测到 Codex/);
-  assert.match(html, /没有检测到 Codex，但你仍然可以先新建项目/);
+  assert.match(html, /没有检测到 Codex；关键词整理和手动整理需要先让 Codex 可用/);
   assert.match(html, /<div class="agent-connection" aria-label="没有检测到 Codex"><span class="agent-light"><\/span>/);
   assert.doesNotMatch(html, /<div class="agent-connection"[^>]*>.*agent-light agent-light--on/s);
 });
 
-test("English locale switches the complete core workflow, not only the guide", () => {
+test("renderer has no guide panel or locale toggle", () => {
+  const { renderApp } = loadViewModule();
+  const html = renderApp(fixture(true));
+  assert.doesNotMatch(html, /getting-started|guide-|小助手|下一步与诊断|我来带路/);
+  assert.doesNotMatch(html, /data-action="guide-/);
+});
+
+test("renderer puts project tools in the top bar and removes stale shortcuts", () => {
+  const { renderApp } = loadViewModule();
+  const html = renderApp(fixture(true));
+  const topbar = html.slice(html.indexOf('<header class="topbar">'), html.indexOf("</header>"));
+  assert.match(topbar, /data-action="project-tools"/);
+  assert.doesNotMatch(topbar, /data-action="refresh"|data-action="open-codex-project"|data-action="new-conversation"/);
+  assert.match(html, /id="project-tools-dialog"/);
+  assert.match(html, /data-action="remove-project">移出项目（可恢复）/);
+  assert.doesNotMatch(html, /data-action="new-conversation"|id="conversation-dialog"/);
+});
+
+test("renderer hides archived projects and exposes restore list from project tools", () => {
   const { renderApp } = loadViewModule();
   const state = fixture(true);
-  state.guide = { ...(state.guide || {}), locale: "en", dismissed: false, sessionId: "guide-en", probes: {}, operations: {}, completionEvidence: [], steps: {}, schemaVersion: 1, copyVersion: 1, sequence: 1 };
+  const archived = { ...state.state.projects[0], id: "project-archived", name: "旧归档项目", status: "archived", archive: { archivedAt: "2026-10-09T12:00:00.000Z", reason: "测试完成" } };
+  state.state.projects.push(archived);
   const html = renderApp(state);
+  const rail = html.slice(html.indexOf('<nav aria-label="项目列表">'), html.indexOf("</nav>"));
+  assert.doesNotMatch(rail, /旧归档项目/);
+  assert.match(html, /data-action="open-archived-projects">已归档项目（1）/);
+  assert.match(html, /id="archived-projects-dialog"/);
+  assert.match(html, /旧归档项目/);
+  assert.match(html, /归档于/);
+  assert.match(html, /data-action="restore-project" data-project="project-archived"/);
+});
 
-  for (const phrase of [
-    "Getting started",
-    "Add project",
-    "Create project",
-    "Import from Codex",
-    "New task",
-    "Project details",
-    "Task list",
-    "No results need your review",
-  ]) assert.match(html, new RegExp(phrase));
-
-  assert.doesNotMatch(html, /小助手|添加项目|新建项目|从 Codex 导入|新建任务|项目详情|任务列表|目前没有需要确认的结果|接受并推进 HEAD/);
-
-  const englishOnly = fixture(true);
-  englishOnly.guide = { ...state.guide };
-  const project = englishOnly.state.projects[0];
-  project.name = "Sample project";
-  project.goal = "Sample goal";
-  project.objective.title = "Sample objective";
-  project.codexProjectSync.detail = "Restart note";
-  project.tasks.forEach((task, index) => {
-    task.title = `Sample task ${index}`;
-    task.workstream = "sample-workstream";
-    task.criteria = ["Sample acceptance check"];
+test("renderer shows timed out tasks as retryable", () => {
+  const { renderApp } = loadViewModule();
+  const state = fixture(true);
+  state.state.projects[0].tasks.unshift({
+    id: "task-timeout", title: "已超时任务", workstream: "general", criteria: [], agent: "codex", sessionPolicy: "warm", status: "timed_out", baseRevision: 3, createdAt: "2026-10-09T00:00:00.000Z",
+    run: { id: "run-timeout", sessionId: "session-timeout", baseRevision: 3, startedAt: "2026-10-08T00:00:00.000Z", status: "timed_out", phase: "timed_out", error: "任务超过 24 小时 lease" },
   });
-  project.sections.forEach((section, index) => { section.name = `Sample section ${index}`; });
-  project.sessions.forEach((session, index) => { session.title = `Sample session ${index}`; });
-  const englishOnlyHtml = renderApp(englishOnly).replaceAll("中文", "");
-  assert.doesNotMatch(englishOnlyHtml, /\p{Script=Han}/u, "English UI contains an untranslated framework label");
+  const html = renderApp(state);
+  assert.match(html, /已超时，可重试/);
+  assert.match(html, /任务超过 24 小时 lease/);
+  assert.match(html, /data-action="dispatch" data-task="task-timeout"/);
 });
 
 test("renderer tolerates legacy tasks without criteria or candidate arrays", () => {
@@ -332,12 +381,25 @@ test("failed import tasks keep the actionable failure visible after the dialog c
   assert.match(html, /重试 Codex 回填/);
 });
 
+test("awaiting visible import keeps an exact prompt recopy action", () => {
+  const { renderApp } = loadViewModule();
+  const state = fixture(true);
+  const project = state.state.projects[0];
+  const task = project.tasks[0];
+  task.workstream = "codex-project-import";
+  task.status = "awaiting_result";
+  task.run = { ...(task.run || {}), status: "awaiting_user", userActionRequired: true, externalThreadId: "visible-import" };
+  const html = renderApp(state);
+  assert.match(html, /复制整理指令/);
+});
+
 test("renderer submission contract sanitizes dependency ids and calls Section assignment API", () => {
   const source = fs.readFileSync(path.join(__dirname, "..", "src", "main.ts"), "utf8");
   assert.match(source, /selectProjectEntryMode/);
   assert.match(source, /window\.harness\.createBlankProject/);
   assert.doesNotMatch(source, /window\.harness\.createConnectedProject/);
-  assert.match(source, /本地项目已创建；没有搜索历史或连接 Agent/);
+  assert.ok(source.includes("自动创建尚未接通"));
+  assert.ok(source.includes("已准备项目初始化；标准对话等待初始化结果回写"));
   assert.match(source, /window\.harness\.importCodexProject\(\{ name: projectName/);
   assert.doesNotMatch(source, /if \(mode === "import"\)[\s\S]{0,900}window\.harness\.addProjectByName/);
   assert.match(source, /targetProjectId: projectImportTargetId/);
@@ -348,5 +410,5 @@ test("renderer submission contract sanitizes dependency ids and calls Section as
   assert.match(source, /selectedOptions/);
   assert.match(source, /selectedValues/);
   assert.match(source, /任务已创建；尚未注入 Agent/);
-  assert.match(source, /官方 Project 已确认；请完全退出 Codex Desktop/);
+  assert.match(source, /官方 Project 已确认；请在现有 Codex Desktop 窗口刷新或手动核对侧栏/);
 });

@@ -32,7 +32,9 @@ export async function auditPackage({ root = projectRoot, reportPath = path.join(
   const executablePath = path.join(unpackedRoot, "AI Project Harness.exe");
   const asarPath = path.join(unpackedRoot, "resources", "app.asar");
   const skillPath = path.join(unpackedRoot, "resources", "integrations", "codex", "skills", "ai-project-harness", "SKILL.md");
-  const requiredArtifacts = [portablePath, executablePath, asarPath, skillPath];
+  const writebackSkillPath = path.join(unpackedRoot, "resources", "integrations", "codex", "skills", "ai-project-harness-writeback", "SKILL.md");
+  const taskStatusSchemaPath = path.join(unpackedRoot, "resources", "protocol", "harness-task-status.schema.json");
+  const requiredArtifacts = [portablePath, executablePath, asarPath, skillPath, writebackSkillPath, taskStatusSchemaPath];
   const missingArtifacts = requiredArtifacts.filter((target) => !fs.existsSync(target));
   if (missingArtifacts.length) throw new Error(`Missing packaged artifacts: ${missingArtifacts.join(", ")}`);
   if (fs.statSync(portablePath).size < 1024 * 1024) throw new Error("Portable artifact is unexpectedly small");
@@ -65,6 +67,8 @@ export async function auditPackage({ root = projectRoot, reportPath = path.join(
     asarPath,
     asarEntries: entries.length,
     skillPath,
+    writebackSkillPath,
+    taskStatusSchemaPath,
     forbiddenEntries,
     findings,
   };

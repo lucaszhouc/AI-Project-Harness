@@ -2,7 +2,9 @@ const { randomUUID, createHash } = require("node:crypto");
 const path = require("node:path");
 const protocol = require("./harness-protocol.cjs");
 const machine = require("./state-machine.cjs");
+const { normalizeKnowledgePayload } = require("./knowledge-compiler.cjs");
 const { scoreProjectName, foldProjectName } = require("./project-discovery.cjs");
+const { harnessProtocolReference } = require("./handoff-protocol.cjs");
 
 const IMPORT_MAX_CHARS = 24000;
 const IMPORT_CONTEXT_MAX_CHARS = 15000;
@@ -30,7 +32,7 @@ function comparablePath(value) {
 }
 
 /** Build a bounded, high-confidence index of existing Codex conversations
- * related to the selected official Project. The index uses app-server facts
+ * related to the selected official Project. The index uses Desktop 原生控制面 facts
  * (official projectId, root, conversation name/preview, updatedAt), never a
  * directory mtime. Raw rollout bytes are archived separately by the caller. */
 function selectCodexProjectThreads(threads, { project, query, matchedName, limit = 100 } = {}) {
@@ -48,7 +50,7 @@ function selectCodexProjectThreads(threads, { project, query, matchedName, limit
     const rootMatch = Boolean(cwd && roots.some((root) => cwd === root || cwd.startsWith(`${root}/`)));
     const title = String(thread.name || "").trim();
     const preview = String(thread.preview || "").trim();
-    if (/Harness\s+导入/i.test(title) || /#\s*AI Project Harness\s*·\s*IMPORT PACKET/i.test(preview)) continue;
+    if (/Harness\s+导入/i.test(title) || /#\s*AI Project Harness\s*·\s*(?:IMPORT PACKET|对话整理指令)/i.test(preview)) continue;
     const titleScore = names.reduce((best, name) => Math.max(best, scoreProjectName(name, title).score), 0);
     const previewFolded = foldProjectName(preview.slice(0, 1200));
     const previewMatch = names.some((name) => {
@@ -79,32 +81,72 @@ function selectCodexProjectThreads(threads, { project, query, matchedName, limit
     || left.id.localeCompare(right.id)).slice(0, Math.max(1, Math.min(5000, Number(limit) || 100)));
 }
 
-function importPrompt(project, { sourceProjectId, schemaPath, context } = {}) {
+function conversationCollectionInstruction(project, { sourceProjectId, context, protocolPaths } = {}) {
   if (!project) throw new Error("Project is required");
   const bounded = context || protocol.buildProjectContext(project, { maxTasks: 30, maxCheckpoints: 12, maxEvents: 30 });
-  const serializedContext = JSON.stringify(bounded);
+  const selectionMode = bounded?.selectionMode === true;
+  const selectedThreadCount = selectionMode && Array.isArray(bounded.sourceThreads) ? bounded.sourceThreads.length : 0;
+  const hasKnowledgeEvidence = selectionMode && Array.isArray(bounded?.knowledgeEvidence?.userEvidence);
+  const defaultTask = String(bounded?.defaultTask || (selectionMode
+    ? "整理选中的 Codex 对话，提取可验证的项目目标、SOP、规则、技术细节、任务、决策、阻塞、进展和下一步，形成可长期复用的项目知识包。"
+    : "整理当前 Codex Project 的可验证项目事实，形成可长期复用的项目知识包。")).trim();
+  const extraTask = String(bounded?.extraTask || "").trim();
+  const keywordDiscovery = !selectionMode && String(bounded?.discoveryMode || "") === "keyword";
+  // A visible collection instruction should stay small and human-readable.
+  // The selected rollout paths and the evidence sidecar are enough for the
+  // Agent to inspect the bounded source; do not inline the whole Harness
+  // snapshot or repeat a large evidence packet in the clipboard instruction.
+  const promptContext = selectionMode
+    ? {
+      selectionMode: true,
+      sourceThreads: Array.isArray(bounded.sourceThreads) ? bounded.sourceThreads : [],
+      ...(bounded.knowledgeEvidencePath ? { knowledgeEvidencePath: bounded.knowledgeEvidencePath } : {}),
+      ...(!bounded.knowledgeEvidencePath && bounded.knowledgeEvidence ? { knowledgeEvidence: bounded.knowledgeEvidence } : {}),
+    }
+    : bounded;
+  const serializedContext = JSON.stringify(promptContext);
   const contextText = serializedContext.length <= IMPORT_CONTEXT_MAX_CHARS
     ? serializedContext
     : `${serializedContext.slice(0, IMPORT_CONTEXT_MAX_CHARS - 80)}…[索引已按上下文预算裁剪，原始归档仍完整]`;
+  const protocolReference = harnessProtocolReference(protocolPaths);
   return [
-    "# AI Project Harness · IMPORT PACKET",
-    "MODE: IMPORT",
+    "# AI Project Harness · 对话整理指令",
+    "MODE: CONVERSATION_COLLECTION",
     `HARNESS_PROJECT_ID: ${clip(project.id, 120)}`,
     `HARNESS_PROJECT_PATH: ${clip(project.path, 800)}`,
     sourceProjectId ? `CODEX_PROJECT_ID: ${clip(sourceProjectId, 160)}` : "CODEX_PROJECT_ID: identify from the current Codex Project",
-    schemaPath ? `HARNESS_IMPORT_SCHEMA: ${clip(schemaPath, 1000)}` : "HARNESS_IMPORT_SCHEMA: use the injected field contract",
+    protocolReference,
     "",
-    "这是一次只读项目拉取，不是新建项目，也不是普通任务。请以当前 Codex Project 的真实内容和最新时间戳为准，完整盘点后回填 Harness。",
-    "先检查当前项目的所有可见对话/线程、最新进展、Git 状态和 GitHub 只读信息；不要根据文件名日期或旧摘要猜测最新进展。",
+    selectionMode
+      ? `这是一次只读的对话整理。只读取用户勾选的 ${selectedThreadCount} 个对话，并把其中可验证的信息整理成项目知识候选。`
+      : "这是一次只读的既有项目整理，不是新建项目，也不是普通开发任务。请以当前 Codex Project 的真实内容和最新时间戳为准，整理项目知识候选。",
+    `默认任务：${defaultTask}`,
+    extraTask ? `用户追加要求：${extraTask}` : "用户追加要求：无。用户可以在本对话后续继续提出新的整理要求。",
+    selectionMode
+      ? "不得扫描或补入未勾选对话；不要根据同目录、相似标题或历史项目归属扩张范围。"
+      : keywordDiscovery
+        ? `这是关键词整理（关键词：${clip(bounded.discoveryQuery, 400)}）。请使用 Codex 可用的官方搜索能力优先查找活跃和归档对话，再用 Project/root/cwd/Git 关系核对候选；搜索结果必须回到真实消息证据，不要只凭标题或目录 mtime 判断。${bounded.search?.fallback ? "Harness 已因原生能力缺失使用有界本地索引回退；请把它视为候选发现，仍需回到 rollout 原文核验。" : bounded.search?.supported ? `Harness 已完成原生线程检索${bounded.search.occurrenceSupported ? "和消息 occurrence 定位" : "，但当前版本未提供 occurrence 定位"}；不要把没有命中消息的关系信号当作正文事实。` : "Harness 的搜索结果能力不可用；请明确记录未验证边界，不要声称已搜索全部历史。"}`
+        : "先检查当前项目的所有可见对话/线程、最新进展、Git 状态和 GitHub 只读信息；不要根据文件名日期或旧摘要猜测最新进展。",
     "不得修改代码、不得修改 Harness 状态文件、不得启动实现任务。不要粘贴完整 transcript、token 或密钥。",
     "先用有界索引完成盘点；不要对 rolloutPath 使用 Get-Content -Raw，也不要把历史会话全文读入上下文。最多核对 8 条最新或最相关线程，使用 head/tail/rg 等定向读取最终消息、任务结果和时间戳；其余线程以索引事实和 notes 记录。Harness 已在上下文外无损归档全部关联 rollout。",
-    "这是一次单轮、有限预算的回填：完成必要核对后立即输出候选，不要为了追求全文重放而继续递归扫描或启动实现任务。无法验证的字段留空并写入 notes。",
-    "请输出且只输出一个 fenced harness-import JSON 对象，严格匹配 protocol/harness-import.schema.json。未知字段省略；无法验证的字段留空并写入 notes。",
-    "任务、Section、checkpoint、决策、阻塞、CTO/Review 会话和 Git/GitHub 都应尽量完整返回；保留来源 ID 与原始 updatedAt。",
+    bounded.knowledgeEvidencePath
+      ? `Harness 已生成有界原话证据索引：${clip(bounded.knowledgeEvidencePath, 1000)}；需要编译规则或 SOP 时只读取该索引，不要重新扫描未选对话。`
+      : "如提示中包含 knowledgeEvidence，请只使用其中的逐字用户证据编译规则和 SOP。",
+    "这是一次单轮、有限预算的知识整理：完成必要核对后立即输出候选，不要为了追求全文重放而继续递归扫描或启动实现任务。无法验证的字段留空并写入 notes。",
+    "请输出且只输出一个 fenced harness-import JSON 对象，严格匹配内置导入协议。它是 Harness 的内部回写格式，不是给用户复制的普通任务包。未知字段省略；无法验证的字段留空并写入 notes。",
+    "候选应尽量包含项目目标、SOP/Playbook、规则、技术细节、任务、Section、checkpoint、决策、阻塞、CTO/Review 会话、Git/GitHub 和来源时间戳。Harness 会在用户审核后把它写入项目状态、动态白皮书、知识索引和原始归档。",
+    ...(hasKnowledgeEvidence ? [
+      "同时编译 knowledge.rules 与 knowledge.playbooks 候选。用户原话是规则的最高优先级证据；Agent 的行动只用于说明做法和结果，Agent 自己的建议不能升级成用户强制规则。",
+      "每条强制规则至少引用一个 knowledgeEvidence.userEvidence；sources.evidenceId 和 sources.quote 必须逐字对应索引，禁止改写、补造或引用 developer/system 消息。",
+      "只把明确要求、纠正、禁止、理由、验收和稳定偏好编译为候选。区分 task/project/domain/global 范围；不确定时使用 project，并把歧义写入 knowledge.notes。",
+      "Playbook 每一步都要带 sources；无法从用户原话确认的操作只可作为观察到的 Agent 行为写入 notes，不能冒充用户 SOP。所有知识仍是 pending 候选，Harness 会单独等待用户审核。",
+    ] : []),
     "",
-    "## 有界导入索引（用于定位，不等于完整 transcript）",
+    "## 有界来源索引（用于定位，不等于完整 transcript）",
     contextText,
-    "索引中的 sourceThreads 按官方 Project ID、Project 根目录或高置信对话名称匹配，并按 updatedAt 排序；优先核对最新条目。rolloutPath 指向原始只读会话，可用流式/定向搜索读取，不要把整份大文件载入上下文。原始 rollout 同时由 Harness 在模型上下文外单独无损归档。",
+    selectionMode
+      ? "索引中的 sourceThreads 就是用户勾选的完整范围。rolloutPath 指向原始只读会话，可用流式/定向搜索读取；不得沿 cwd、标题、Project 或父子关系发现更多会话。"
+      : "索引中的 sourceThreads 合并了关键词正文搜索、消息 occurrence 和 Project/root/cwd/Git 关系信号，并按 updatedAt 排序；优先核对最新条目。search.occurrences 中的 turnId/itemId/matchRange 是定位证据，不能替代对 rolloutPath 的定向核验。rolloutPath 指向原始只读会话，可用流式/定向搜索读取，不要把整份大文件载入上下文。原始 rollout 同时由 Harness 在模型上下文外单独无损归档。",
     "",
     "## 输出要求",
     "harness-import JSON 的 generatedAt 必须是本次盘点完成时的 ISO 时间；source.agent 固定为 codex；source.codexProjectId 必须等于 CODEX_PROJECT_ID；source.sourceRevision 填可确认的最新修订或留空。project.path 必须等于 HARNESS_PROJECT_PATH。",
@@ -112,7 +154,7 @@ function importPrompt(project, { sourceProjectId, schemaPath, context } = {}) {
   ].join("\n").slice(0, IMPORT_MAX_CHARS);
 }
 
-function parseHarnessImport(text) {
+function parseHarnessImport(text, { evidence, requireKnowledge = false } = {}) {
   IMPORT_BLOCK.lastIndex = 0;
   let match;
   let candidate;
@@ -131,7 +173,10 @@ function parseHarnessImport(text) {
   if (!String(candidate.project.path || "").trim()) throw new Error("HARNESS_IMPORT_PATH_REQUIRED: project.path is required");
   if (!candidate.source || typeof candidate.source !== "object" || !String(candidate.source.codexProjectId || "").trim()) throw new Error("HARNESS_IMPORT_SOURCE_REQUIRED: source.codexProjectId is required");
   for (const key of ["tasks", "sections", "checkpoints", "decisions"]) if (!Array.isArray(candidate[key])) throw new Error(`HARNESS_IMPORT_${key.toUpperCase()}: array is required`);
-  return normalizeImport(candidate);
+  const normalized = normalizeImport(candidate);
+  if (candidate.knowledge) normalized.knowledge = normalizeKnowledgePayload(candidate.knowledge, evidence || {});
+  else if (requireKnowledge) throw new Error("HARNESS_IMPORT_KNOWLEDGE_REQUIRED: manual conversation imports must return knowledge candidates, even when the arrays are empty");
+  return normalized;
 }
 
 function normalizeImport(input) {
@@ -333,4 +378,4 @@ function applyHarnessImport(state, projectId, rawInput, { now = () => new Date()
   return { projectId: project.id, imported, sourceRevision: record.sourceRevision, importId: record.id };
 }
 
-module.exports = { IMPORT_MAX_CHARS, importPrompt, selectCodexProjectThreads, parseHarnessImport, normalizeImport, applyHarnessImport };
+module.exports = { IMPORT_MAX_CHARS, conversationCollectionInstruction, selectCodexProjectThreads, parseHarnessImport, normalizeImport, applyHarnessImport };

@@ -1,4 +1,34 @@
+# Current source update — 2026-11-02
+
+- Desktop-only runtime; removed CLI and background execution fallbacks.
+- Fix initialization dispatch identity and gate standard drafts on accepted context.
+- Separate thread binding from verified readiness; add isolated IPC and handoff regression coverage.
+- Automatic Desktop thread creation/readback/writeback is still incomplete. This is not a binary release.
+
+> 当前状态：历史归档，仅保留当时的证据与决策。2026-10-24 起，运行时唯一有效路线是 Codex Desktop 原生深链/内置交接；本文中关于外部命令、后端协议或旧 smoke 的描述均不可作为实施指令。`DEPRECATED_HISTORICAL_RECORD`
+
 # Changelog
+
+## 0.0.25-rc.2 — 2026-10-07 (local release candidate)
+
+- Restores readable app-server-created Codex threads from `archived_sessions` before opening them, so CTO, Review, import, task, and discussion conversations appear in the Desktop sidebar.
+- Adds an idempotent `thread/unarchive` repair path with regression coverage for archived and already-visible rollouts.
+- Completes real Desktop sidebar verification for the Project Harness release candidate.
+
+## 0.0.24 — 2026-09-28 (local preview)
+
+- Compiles selected Codex chats into traceable user-rule and Playbook candidates while keeping exact user quotes in a detached evidence index.
+- Requires explicit human acceptance before a rule or Playbook can enter project context, the dynamic project whitepaper, or future task packets.
+- Rejects unknown, mismatched, and Agent-only normative sources instead of silently promoting model suggestions into user policy.
+- Adds bilingual review cards, accepted-knowledge project details, legacy-state migration, and packaged-runtime coverage for the knowledge compiler.
+- This local preview is not published to GitHub and does not replace the public v0.0.22 release.
+
+## 0.0.23 — 2026-09-27 (local preview)
+
+- Adds a checkbox-based conversation picker for creating a Harness project from an exact set of unarchived local Codex chats.
+- Mirrors the Codex sidebar structure with pinned chats, Codex projects, and loose chats without modifying Codex state.
+- Revalidates selected thread IDs at submission time and keeps imported candidates behind the existing human-review gate.
+- This local preview is not published to GitHub and does not replace the public v0.0.22 release.
 
 ## 0.0.22 — 2026-09-21
 

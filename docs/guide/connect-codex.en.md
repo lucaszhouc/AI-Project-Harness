@@ -1,11 +1,10 @@
-# Connect Codex
+# Connect Codex Desktop
 
-Harness distinguishes Codex Desktop, Codex CLI, login, experimental app-server support, and deep-link success. One does not prove the others.
+Harness uses the installed Codex Desktop application through its native deep-link and desktop control surface. It does not install, detect, or invoke Codex CLI or app-server.
 
-1. Follow the [official CLI install guide](https://developers.openai.com/codex/cli).
-2. Run `codex --version`; the current local compatibility baseline is version-specific.
-3. Run `codex login` and complete the official browser flow. Harness never asks for credentials.
-4. In Harness, select **Check again**. `missing`, `unauth`, `unsupported`, `error`, and `stale` have different recovery meanings.
-5. Create a local project first, then select **Connect Codex** and confirm the displayed scope/cost boundary.
+1. Start and sign in to Codex Desktop using its own UI. Harness never asks for credentials.
+2. In Harness, create or select a local project and choose **Connect Codex**.
+3. Harness sends a native `codex://` request. Confirm the project appears in the Codex Desktop sidebar.
+4. If the running Desktop instance does not expose a required native operation, Harness blocks that operation and keeps the local project usable.
 
-The probe is read-only and starts zero turns. Connection is a separate side-effecting action. If connection fails, the local project remains usable. App-server is experimental per the [official documentation](https://developers.openai.com/codex/app-server). Exact conversation opening is recorded only after an actual user-triggered open; otherwise Harness shows unknown/fallback.
+Project registration is confirmed only by a fresh Desktop sidebar readback. A deep-link request alone is recorded as pending; no CLI or app-server result can upgrade it to success.

@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ai-project-harness.local/protocol/harness-task-status.schema.json",
+  "title": "AI Project Harness task status report",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["projectId", "taskId", "runId", "state"],
+  "properties": {
+    "projectId": { "type": "string", "minLength": 1 },
+    "taskId": { "type": "string", "minLength": 1 },
+    "runId": { "type": "string", "minLength": 1 },
+    "state": { "enum": ["running", "heartbeat", "blocked", "completed", "failed"] },
+    "phase": { "type": "string", "maxLength": 120 },
+    "detail": { "type": "string", "maxLength": 500 },
+    "progress": { "type": "number", "minimum": 0, "maximum": 100 },
+    "operationId": { "type": "string", "maxLength": 160 },
+    "targetFingerprint": { "type": "string", "maxLength": 500 }
+  }
+}

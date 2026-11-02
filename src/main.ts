@@ -2,9 +2,10 @@ import "./base.css";
 import "./app.css";
 import type { CandidateResult, Snapshot, Task } from "./types";
 import { renderApp } from "./view";
+import { reconcileHtml } from "./dom-reconcile.mjs";
 import { userFacingErrorDetails, userFacingErrorMessage } from "./ipc-error-message.mjs";
 import { completedOnboardingState, escapeOnboardingHtml, failedOnboardingState, progressOnboardingState, renderOnboardingStatus } from "./onboarding-ui.mjs";
-import { localizeAppHtml } from "./app-copy.mjs";
+import { renderConversationPicker, renderConversationPickerError, renderConversationPickerLoading } from "./conversation-picker.mjs";
 
 const rootCandidate = document.querySelector<HTMLDivElement>("#app");
 if (!rootCandidate) throw new Error("App root not found");
@@ -15,7 +16,7 @@ let pendingRuntimeSnapshot: Snapshot | undefined;
 let pointerInteractionActive = false;
 let scrollInteractionActive = false;
 let scrollInteractionTimer: number | undefined;
-let busy = false;
+const pendingOperations = new Set<string>();
 let detailsOpen = false;
 let projectSearchQuery = "";
 let activeToast: { message: string; kind: "ok" | "error"; expiresAt: number } | undefined;
@@ -23,15 +24,12 @@ let toastTimer: number | undefined;
 let projectImportTargetId: string | undefined;
 let projectImportSourceId: string | undefined;
 let connectedProjectId: string | undefined;
-let activeGuideProbeSubject: string | undefined;
+let conversationIndexRequest = 0;
+let projectEntryMode: "blank" | "import" | "threads" | "" = "";
 let onboardingState: ReturnType<typeof progressOnboardingState> | ReturnType<typeof failedOnboardingState> | ReturnType<typeof completedOnboardingState> | { status: "idle" } = { status: "idle" };
 
-function currentLocale(): "zh-CN" | "en" {
-  return snapshot?.guide?.locale === "en" ? "en" : "zh-CN";
-}
-
 function uiText(value: string): string {
-  return localizeAppHtml(value, currentLocale());
+  return value;
 }
 
 function shouldAcceptSnapshot(next: Snapshot): boolean {
@@ -56,11 +54,12 @@ function setSnapshot(next: Snapshot): boolean {
 }
 
 function selectedProject() {
-  return snapshot.state.projects.find((project) => project.id === snapshot.state.selectedProjectId) || snapshot.state.projects[0];
+  return snapshot.state.projects.find((project) => project.id === snapshot.state.selectedProjectId && project.status !== "archived")
+    || snapshot.state.projects.find((project) => project.status !== "archived")!;
 }
 
 function render() {
-  root.innerHTML = renderApp(snapshot, detailsOpen);
+  reconcileHtml(root, renderApp(snapshot, detailsOpen));
   restoreActiveToast();
   const search = document.querySelector<HTMLInputElement>("#project-search");
   if (search) {
@@ -162,7 +161,7 @@ function restoreOpenDialog(state?: OpenDialogState) {
     if (scrollTop !== undefined) control.scrollTop = scrollTop;
     if (scrollLeft !== undefined) control.scrollLeft = scrollLeft;
   });
-  dialog.showModal();
+  if (!dialog.open) dialog.showModal();
   if (state.id === "project-dialog") {
     dialog.addEventListener("cancel", keepBusyProjectDialogOpen);
     syncProjectOnboardingUi();
@@ -253,13 +252,7 @@ function renderPreservingUi() {
 }
 
 function hasActiveUserInteraction() {
-  if (pointerInteractionActive) return true;
-  if (scrollInteractionActive) return true;
-  if (document.querySelector("dialog[open]")) return true;
-  const active = document.activeElement;
-  return Boolean(active && active !== document.body && active !== document.documentElement
-    && active instanceof HTMLElement
-    && active.matches("input, textarea, select, [contenteditable=\"true\"], [role=\"textbox\"]"));
+  return pointerInteractionActive;
 }
 
 function flushPendingRuntimeSnapshot() {
@@ -286,9 +279,19 @@ function toast(message: string, kind: "ok" | "error" = "ok") {
 }
 
 async function execute<T>(operation: () => Promise<T>, success?: string, onError?: (error: unknown) => void): Promise<T | undefined> {
-  if (busy) return undefined;
-  busy = true;
+  const initiator = document.activeElement instanceof HTMLElement ? document.activeElement : undefined;
+  const control = initiator?.closest<HTMLElement>("button[data-action], form");
+  const key = [snapshot?.state.selectedProjectId, operation.toString(), control?.dataset.action, control?.dataset.task, control?.dataset.project, control?.dataset.section, control?.dataset.session, control?.dataset.knowledge, control?.dataset.hash, control?.id].join(":");
+  if (pendingOperations.has(key)) { toast("该操作仍在处理中，已阻止重复提交"); return undefined; }
+  pendingOperations.add(key);
   document.body.classList.add("is-busy");
+  const previousAriaBusy = control?.getAttribute("aria-busy");
+  control?.setAttribute("data-operation-busy", key);
+  control?.setAttribute("aria-busy", "true");
+  const button = control instanceof HTMLButtonElement ? control : undefined;
+  const previouslyDisabled = button?.disabled;
+  if (button) button.disabled = true;
+  const waitNotice = window.setTimeout(() => toast("该操作仍在等待后台返回；其他功能可以继续使用"), 1500);
   try {
     const result = await operation();
     if (success) toast(success);
@@ -298,23 +301,76 @@ async function execute<T>(operation: () => Promise<T>, success?: string, onError
     else toast(userFacingErrorMessage(error), "error");
     return undefined;
   } finally {
-    busy = false;
-    document.body.classList.remove("is-busy");
+    window.clearTimeout(waitNotice);
+    pendingOperations.delete(key);
+    document.body.classList.toggle("is-busy", pendingOperations.size > 0);
+    control?.removeAttribute("data-operation-busy");
+    if (control?.getAttribute("aria-busy") === "true") {
+      if (previousAriaBusy != null) control.setAttribute("aria-busy", previousAriaBusy);
+      else control.removeAttribute("aria-busy");
+    }
+    if (button) button.disabled = Boolean(previouslyDisabled);
   }
+}
+
+function conversationPickerHtml(html: string, index?: Awaited<ReturnType<typeof window.harness.listCodexConversations>>): string {
+  return html;
+}
+
+function syncConversationImportControls() {
+  const form = document.querySelector<HTMLFormElement>("#project-form");
+  if (!form || form.dataset.mode !== "threads") return;
+  const selectedCount = form.querySelectorAll<HTMLInputElement>('input[name="threadIds"]:checked').length;
+  const name = form.querySelector<HTMLInputElement>('input[name="threadsName"]')?.value.trim() || "";
+  const count = form.querySelector<HTMLElement>("#conversation-selection-count");
+  if (count) count.textContent = `已选 ${selectedCount} 个`;
+  const submit = form.querySelector<HTMLButtonElement>('button[type="submit"]');
+  if (submit && onboardingState.status !== "progress") {
+    submit.disabled = !name || selectedCount === 0;
+    submit.textContent = "载入已选对话";
+  }
+}
+
+async function loadCodexConversationIndex() {
+  const container = document.querySelector<HTMLDivElement>("#codex-conversation-picker");
+  if (!container) return;
+  const selected = new Set(Array.from(container.querySelectorAll<HTMLInputElement>('input[name="threadIds"]:checked')).map((input) => input.value));
+  const request = ++conversationIndexRequest;
+  container.innerHTML = conversationPickerHtml(renderConversationPickerLoading());
+  try {
+    const index = await window.harness.listCodexConversations();
+    if (request !== conversationIndexRequest || !container.isConnected) return;
+    container.innerHTML = conversationPickerHtml(renderConversationPicker(index), index);
+    container.querySelectorAll<HTMLInputElement>('input[name="threadIds"]').forEach((input) => { input.checked = selected.has(input.value); });
+  } catch (error) {
+    if (request !== conversationIndexRequest || !container.isConnected) return;
+    container.innerHTML = conversationPickerHtml(renderConversationPickerError(error));
+  }
+  syncConversationImportControls();
 }
 
 function syncProjectOnboardingUi() {
   const form = document.querySelector<HTMLFormElement>("#project-form");
   const status = document.querySelector<HTMLDivElement>("#project-onboarding-status");
+  const progressStatus = document.querySelector<HTMLDivElement>("#project-progress-status");
+  const progressDialog = document.querySelector<HTMLDialogElement>("#project-progress-dialog");
   if (!form || !status) return;
   const inProgress = onboardingState.status === "progress";
-  const mode = form.dataset.mode;
-  status.innerHTML = uiText(renderOnboardingStatus(onboardingState));
+  const mode = (form.dataset.mode || form.querySelector<HTMLInputElement>('input[name="entryMode"]')?.value || projectEntryMode) as "blank" | "import" | "threads" | "";
+  if (mode) {
+    form.dataset.mode = mode;
+    const entryMode = form.querySelector<HTMLInputElement>('input[name="entryMode"]');
+    if (entryMode) entryMode.value = mode;
+  }
+  const renderedStatus = uiText(renderOnboardingStatus(onboardingState));
+  status.innerHTML = renderedStatus;
+  if (progressStatus) progressStatus.innerHTML = renderedStatus;
   status.hidden = onboardingState.status === "idle";
   form.setAttribute("aria-busy", String(inProgress));
   form.querySelectorAll<HTMLInputElement | HTMLButtonElement | HTMLTextAreaElement | HTMLSelectElement>("input, button, textarea, select").forEach((control) => {
     const panel = control.closest<HTMLElement>("[data-project-mode-panel]");
-    control.disabled = inProgress || Boolean(panel && panel.dataset.projectModePanel !== mode);
+    const activeRecovery = !inProgress && ["error", "warning", "notice"].includes(onboardingState.status) && panel?.dataset.projectModePanel === mode;
+    control.disabled = activeRecovery ? false : inProgress || Boolean(panel && panel.dataset.projectModePanel !== mode);
   });
   const submit = form.querySelector<HTMLButtonElement>('button[type="submit"]');
   if (submit) {
@@ -331,6 +387,22 @@ function syncProjectOnboardingUi() {
               ? "开始导入"
                : "选择方式后继续");
   }
+  syncConversationImportControls();
+  if (progressDialog && inProgress && !progressDialog.open) progressDialog.showModal();
+  if (!inProgress && onboardingState.status !== "idle" && onboardingState.status !== "completed" && progressDialog?.open) {
+    // Errors and Desktop-open warnings need the retry controls in the source
+    // form. The progress dialog is only the non-blocking preparation view.
+    progressDialog.close();
+    const projectDialog = document.querySelector<HTMLDialogElement>("#project-dialog");
+    if (projectDialog && !projectDialog.open) projectDialog.showModal();
+  }
+}
+
+function showProjectProgressDialog() {
+  document.querySelector<HTMLDialogElement>("#project-dialog")?.close();
+  const dialog = document.querySelector<HTMLDialogElement>("#project-progress-dialog");
+  if (dialog && !dialog.open) dialog.showModal();
+  syncProjectOnboardingUi();
 }
 
 function openTaskDialog() {
@@ -346,9 +418,11 @@ function keepBusyProjectDialogOpen(event: Event) {
 function openProjectDialog() {
   const dialog = document.querySelector<HTMLDialogElement>("#project-dialog");
   onboardingState = { status: "idle" };
+  projectEntryMode = "";
   connectedProjectId = undefined;
   projectImportTargetId = undefined;
   projectImportSourceId = undefined;
+  conversationIndexRequest += 1;
   const form = dialog?.querySelector<HTMLFormElement>("#project-form");
   if (form) {
     form.reset();
@@ -364,6 +438,8 @@ function openProjectDialog() {
     if (hint) { hint.dataset.mode = ""; hint.textContent = "选择一种方式后继续。"; }
     const submit = form.querySelector<HTMLButtonElement>('button[type="submit"]');
     if (submit) { submit.disabled = true; submit.textContent = "选择方式后继续"; }
+    const picker = form.querySelector<HTMLDivElement>("#codex-conversation-picker");
+    if (picker) picker.innerHTML = conversationPickerHtml('<div class="conversation-picker-state"><strong>选择这个方式后读取对话索引</strong><small>不会打开对话正文。</small></div>');
   }
   dialog?.addEventListener("cancel", keepBusyProjectDialogOpen);
   dialog?.showModal();
@@ -371,9 +447,10 @@ function openProjectDialog() {
   dialog?.querySelector<HTMLButtonElement>('[data-action="select-project-mode"]')?.focus();
 }
 
-function selectProjectEntryMode(mode: "blank" | "import") {
+function selectProjectEntryMode(mode: "blank" | "import" | "threads") {
   const form = document.querySelector<HTMLFormElement>("#project-form");
   if (!form) return;
+  projectEntryMode = mode;
   form.dataset.mode = mode;
   const entryMode = form.querySelector<HTMLInputElement>('input[name="entryMode"]');
   if (entryMode) entryMode.value = mode;
@@ -393,15 +470,18 @@ function selectProjectEntryMode(mode: "blank" | "import") {
     hint.dataset.mode = mode;
     hint.textContent = mode === "blank"
       ? "先保存项目资料；这一步不会连接 Codex。"
-      : "选择一个现有的 Codex 项目，把其中的项目信息导入 Harness。";
+      : mode === "import"
+        ? "选择一个现有的 Codex 项目，把其中的项目信息导入 Harness。"
+        : "按 Codex 侧栏结构勾选对话；只会载入你选中的内容。";
   }
   const submit = form.querySelector<HTMLButtonElement>('button[type="submit"]');
   if (submit) {
-    submit.disabled = false;
-    submit.textContent = mode === "blank" ? "新建项目" : "开始导入";
+    submit.disabled = mode === "threads";
+    submit.textContent = mode === "blank" ? "新建项目" : mode === "import" ? "开始导入" : "载入已选对话";
   }
-  const focusName = mode === "blank" ? "blankName" : "importName";
+  const focusName = mode === "blank" ? "blankName" : mode === "import" ? "importName" : "threadsName";
   form.querySelector<HTMLInputElement>(`[name="${focusName}"]`)?.focus();
+  if (mode === "threads") void loadCodexConversationIndex();
 }
 
 function resultTemplate(task: Task): CandidateResult {
@@ -442,49 +522,19 @@ document.addEventListener("click", async (event) => {
   const taskId = button.dataset.task;
   const sectionId = button.dataset.section;
   const sessionId = button.dataset.session;
+  const knowledgeId = button.dataset.knowledge;
   const archiveHash = button.dataset.hash;
 
-  if (action === "select-project-mode" && (button.dataset.mode === "blank" || button.dataset.mode === "import")) {
+  if (button.closest<HTMLDialogElement>("#project-tools-dialog")) {
+    button.closest<HTMLDialogElement>("dialog")?.close();
+  }
+
+  if (action === "select-project-mode" && (button.dataset.mode === "blank" || button.dataset.mode === "import" || button.dataset.mode === "threads")) {
     selectProjectEntryMode(button.dataset.mode);
     return;
   }
-
-  if (action === "guide-open" || action === "guide-close") {
-    const result = await execute(() => window.harness.guideUpdate({ dismissed: action === "guide-close" }));
-    if (result) { setSnapshot(result); renderPreservingUi(); }
-    return;
-  }
-  if (action === "guide-locale") {
-    const result = await execute(() => window.harness.guideUpdate({ locale: snapshot.guide?.locale === "en" ? "zh-CN" : "en" }));
-    if (result) { setSnapshot(result); renderPreservingUi(); }
-    return;
-  }
-  if (action === "guide-locate") {
-    const targetId = button.dataset.guideTargetRef;
-    const guideTarget = targetId ? document.querySelector<HTMLElement>(`[data-guide-target="${CSS.escape(targetId)}"]`) : null;
-    if (guideTarget) { guideTarget.scrollIntoView({ block: "center", behavior: "smooth" }); guideTarget.focus({ preventScroll: true }); }
-    else toast("当前界面没有这个控件；请先完成前置步骤。", "error");
-    return;
-  }
-  if (action === "guide-recheck") {
-    button.disabled = true;
-    let latest: Snapshot | undefined;
-    try {
-      for (const subject of ["codex-desktop", "codex-cli", "codex-login", "app-server"] as const) {
-        activeGuideProbeSubject = subject;
-        const result = await window.harness.guideProbe(subject);
-        latest = result.snapshot;
-        if (result.probe.errorCode === "PROBE_CANCELLED") break;
-      }
-      if (latest) { setSnapshot(latest); renderPreservingUi(); toast("检查完成"); }
-    } catch (error) { toast(userFacingErrorMessage(error), "error"); }
-    finally { activeGuideProbeSubject = undefined; button.disabled = false; }
-    return;
-  }
-  if (action === "guide-cancel-probe") {
-    if (!activeGuideProbeSubject) { toast("现在没有正在进行的检查"); return; }
-    const result = await window.harness.guideCancelProbe(activeGuideProbeSubject);
-    toast(result.cancelled ? "检查已停止，正在运行的任务不会受到影响" : "检查已经结束");
+  if (action === "reload-conversation-index") {
+    void loadCodexConversationIndex();
     return;
   }
 
@@ -492,6 +542,14 @@ document.addEventListener("click", async (event) => {
     detailsOpen = true;
     render();
     document.querySelector<HTMLButtonElement>('.project-drawer [data-action="close-details"]')?.focus();
+    return;
+  }
+  if (action === "project-tools") {
+    document.querySelector<HTMLDialogElement>("#project-tools-dialog")?.showModal();
+    return;
+  }
+  if (action === "open-archived-projects") {
+    document.querySelector<HTMLDialogElement>("#archived-projects-dialog")?.showModal();
     return;
   }
   if (action === "close-details") {
@@ -520,12 +578,6 @@ document.addEventListener("click", async (event) => {
     }
     return;
   }
-  if (action === "new-conversation") {
-    const dialog = document.querySelector<HTMLDialogElement>("#conversation-dialog");
-    dialog?.showModal();
-    dialog?.querySelector<HTMLInputElement>('input[name="title"]')?.focus();
-    return;
-  }
   if (action === "sync-codex") {
     const currentProject = selectedProject();
     const result = await execute(() => window.harness.syncCodexProject(currentProject.id));
@@ -536,7 +588,7 @@ document.addEventListener("click", async (event) => {
       toast(refreshed?.codexProjectSync?.state === "desktop-registered"
         ? "Codex Project 与 CTO / Review 已创建并归组"
         : refreshed?.codexProjectSync?.state === "desktop-restart-required"
-          ? "官方 Project 已确认；请完全退出 Codex Desktop 后重开，再核对侧栏"
+          ? "官方 Project 已确认；请在现有 Codex Desktop 窗口刷新或手动核对侧栏"
           : "Codex Project 已同步");
     }
     return;
@@ -584,7 +636,9 @@ document.addEventListener("click", async (event) => {
       targetFingerprint: `project:${currentProject.id}`,
       confirmedAt: new Date().toISOString(),
     }));
-    if (result) { setSnapshot(result.snapshot); renderPreservingUi(); toast("Codex 连接已建立"); }
+    if (result) { setSnapshot(result.snapshot); renderPreservingUi(); toast(result.initializationRequired
+      ? "已准备项目初始化；标准对话等待初始化结果回写"
+      : result.desktopOpened === false ? "Desktop 入口未能打开，请重试" : "已请求 Desktop 入口；自动创建标准对话尚未接通"); }
     return;
   }
   if (action === "import-into-project") {
@@ -714,6 +768,18 @@ document.addEventListener("click", async (event) => {
     if (result) { setSnapshot(result); detailsOpen = false; render(); toast("项目已归档，原始数据未删除"); }
     return;
   }
+  if (action === "remove-project") {
+    const confirmed = window.confirm("将这个项目从 Harness 项目列表移出？项目状态会先保存到数据盘的 _eliminated/projects/，不会删除项目文件夹、Git、Codex Project 或对话。");
+    if (!confirmed) return;
+    const result = await execute(() => window.harness.removeProject(project.id, "用户从项目工具移出"));
+    if (result) {
+      setSnapshot(result.snapshot);
+      detailsOpen = false;
+      render();
+      toast(`项目已移出 Harness，可从 ${result.archivePath} 恢复`, "ok");
+    }
+    return;
+  }
   if (action === "pause-project" || action === "resume-project") {
     const nextStatus = action === "pause-project" ? "paused" : "active";
     const result = await execute(() => window.harness.setProjectStatus(project.id, nextStatus));
@@ -732,7 +798,9 @@ document.addEventListener("click", async (event) => {
     return;
   }
   if (action === "restore-project") {
-    const result = await execute(() => window.harness.restoreProject(project.id));
+    const restoreId = button.dataset.project || project?.id;
+    if (!restoreId) return;
+    const result = await execute(() => window.harness.restoreProject(restoreId));
     if (result) { setSnapshot(result); renderPreservingUi(); toast("项目已恢复"); }
     return;
   }
@@ -790,18 +858,37 @@ document.addEventListener("click", async (event) => {
     if (result) {
       setSnapshot(result.snapshot);
       renderPreservingUi();
-      toast(dispatchingImport ? "Codex 项目回填已重新启动" : result.userActionRequired ? `${result.agent === "hermes" ? "Hermes" : "Claude Code"} 用户主动路径已准备，任务包已复制` : "任务已开始，任务包已复制");
+       toast(dispatchingImport ? "对话整理已重新准备" : result.userActionRequired ? `${result.agent === "codex" ? "Codex 原生" : result.agent === "hermes" ? "Hermes" : "Claude Code"} 任务包已复制；请粘贴发送，尚未执行` : "任务已开始，任务包已复制");
     }
     return;
   }
   if (action === "stop-task" && taskId) {
     const result = await execute(() => window.harness.stopTask(project.id, taskId));
-    if (result) { setSnapshot(result); renderPreservingUi(); toast("任务已停止，项目状态已保存"); }
+    if (result) { setSnapshot(result); renderPreservingUi(); toast("任务跟踪已停止；原生 Agent 的执行请在其窗口停止"); }
     return;
   }
   if (action === "copy-packet" && taskId) {
+    const isConversationCollection = project.tasks.find((item) => item.id === taskId)?.workstream === "codex-project-import";
     const result = await execute(() => window.harness.copyMissionPacket(project.id, taskId));
-    if (result) toast("任务包已复制");
+    if (result) toast(isConversationCollection ? "整理指令已复制" : "任务包已复制");
+    return;
+  }
+  if (action === "accept-knowledge" && knowledgeId) {
+    const result = await execute(() => window.harness.acceptKnowledgeCandidate(project.id, knowledgeId));
+    if (result) {
+      setSnapshot(result);
+      renderPreservingUi();
+      toast("规则已审核并纳入后续任务上下文");
+    }
+    return;
+  }
+  if (action === "reject-knowledge" && knowledgeId) {
+    const result = await execute(() => window.harness.rejectKnowledgeCandidate(project.id, knowledgeId, "用户从审核区拒绝候选"));
+    if (result) {
+      setSnapshot(result);
+      renderPreservingUi();
+      toast("知识候选已拒绝，原始对话证据仍保留");
+    }
     return;
   }
   if (action === "accept" && taskId) {
@@ -810,7 +897,17 @@ document.addEventListener("click", async (event) => {
     if (result) {
       setSnapshot(result);
       renderPreservingUi();
-      toast(acceptingImport ? "Codex 项目数据已审核并写入 Harness" : "结果已接受，Project HEAD 已推进");
+      const standardControls = (result as Snapshot & { standardControls?: { opened?: Array<{ role?: string; opened?: boolean; requested?: boolean; userActionRequired?: boolean; verified?: boolean }> } }).standardControls;
+      const standardControlItems = standardControls?.opened || [];
+      const verifiedRoles = standardControlItems.filter((item) => item.verified).map((item) => item.role).filter(Boolean);
+      const requestedRoles = standardControlItems.filter((item) => item.requested || item.userActionRequired).map((item) => item.role).filter(Boolean);
+      toast(acceptingImport
+        ? "Codex 项目数据已审核并写入 Harness"
+        : verifiedRoles.length >= 2
+          ? "初始化已接受；Review、CTO 标准对话已绑定到 Desktop 原生线程"
+          : requestedRoles.length >= 2
+            ? "初始化已接受；已请求 Review、CTO 草稿，自动创建标准对话尚未接通"
+          : "结果已接受，Project HEAD 已推进");
     }
     return;
   }
@@ -835,6 +932,16 @@ document.addEventListener("click", async (event) => {
   }
 });
 
+document.addEventListener("input", (event) => {
+  const target = event.target as HTMLInputElement;
+  if (target.matches('#project-form input[name="threadsName"], #project-form input[name="threadIds"]')) syncConversationImportControls();
+});
+
+document.addEventListener("change", (event) => {
+  const target = event.target as HTMLInputElement;
+  if (target.matches('#project-form input[name="threadIds"]')) syncConversationImportControls();
+});
+
 document.addEventListener("submit", async (event) => {
   event.preventDefault();
   const form = event.target as HTMLFormElement;
@@ -842,16 +949,20 @@ document.addEventListener("submit", async (event) => {
   if (form.id === "project-form") {
     const data = new FormData(form);
     const mode = String(data.get("entryMode") || form.dataset.mode || "");
-    if (mode !== "blank" && mode !== "import") {
-      toast("请先选择“新建项目”或“从 Codex 导入”", "error");
+    if (mode !== "blank" && mode !== "import" && mode !== "threads") {
+      toast("请先选择一种新建方式", "error");
       return;
     }
     if (mode === "blank") {
       const blankName = String(data.get("blankName") || "").trim();
       if (!blankName) { toast("请填写项目名称", "error"); return; }
       onboardingState = progressOnboardingState({ stage: "creating_project", progress: 40, label: "正在新建项目" });
-      syncProjectOnboardingUi();
-      const operationId = crypto.randomUUID();
+      showProjectProgressDialog();
+      // Repeated submits for the same requested project must hit the same
+      // operation receipt. A per-click UUID defeats the idempotency ledger and
+      // was the reason duplicate project records appeared after a slow/failing
+      // Codex connection.
+      const operationId = `blank:${blankName.normalize("NFKC").trim().toLowerCase()}:${String(data.get("blankPath") || "").trim().toLowerCase()}`;
       const result = await execute(() => window.harness.createBlankProject({
           name: blankName,
           path: String(data.get("blankPath") || "").trim(),
@@ -859,7 +970,13 @@ document.addEventListener("submit", async (event) => {
           techStack: String(data.get("blankTechStack") || "").split(/\r?\n/).map((item) => item.trim()).filter(Boolean),
           constraints: String(data.get("blankConstraints") || "").split(/\r?\n/).map((item) => item.trim()).filter(Boolean),
           operationId,
-          targetFingerprint: `blank:${blankName.normalize("NFKC").toLowerCase()}:${operationId}`,
+          // The operation ledger must identify the requested project, not the
+          // click instance. Including a fresh UUID here made a double-click or
+          // a renderer retry create a second Harness project for the same
+          // folder/name. Keep the fingerprint stable so the same request is
+          // replayed idempotently while a failed connection remains retryable
+          // through the existing project card.
+          targetFingerprint: `blank:${blankName.normalize("NFKC").trim().toLowerCase()}:${String(data.get("blankPath") || "").trim().toLowerCase()}`,
           confirmedAt: new Date().toISOString(),
         }), undefined, (error) => {
         onboardingState = failedOnboardingState(error);
@@ -868,18 +985,55 @@ document.addEventListener("submit", async (event) => {
       if (result) {
         onboardingState = { status: "completed" };
         setSnapshot(result.snapshot);
+        document.querySelector<HTMLDialogElement>("#project-progress-dialog")?.close();
         form.closest<HTMLDialogElement>("dialog")?.close();
         form.reset();
         detailsOpen = false;
         render();
-        toast("本地项目已创建；没有搜索历史或连接 Agent");
+        toast(result.initializationRequired ? "已准备项目初始化；标准对话等待初始化结果回写"
+          : result.blankOnly ? (result.desktopOpened === false ? "项目已创建，但 Desktop 原生项目入口没有打开" : "项目已创建；已请求标准对话草稿，自动创建尚未接通") : "本地项目已创建");
+      }
+      return;
+    }
+    if (mode === "threads") {
+      const name = String(data.get("threadsName") || "").trim();
+      const threadIds = data.getAll("threadIds").map((value) => String(value).trim()).filter(Boolean);
+      if (!name) { toast("请填写新项目名称", "error"); return; }
+      if (!threadIds.length) { toast("至少选择一个 Codex 对话", "error"); return; }
+      onboardingState = progressOnboardingState({ stage: "starting", progress: 4, label: "正在准备已选对话…" });
+      showProjectProgressDialog();
+      const result = await execute(
+        () => window.harness.importCodexConversations({
+          name,
+          goal: String(data.get("threadsGoal") || "").trim(),
+          threadIds,
+        }),
+        undefined,
+        (error) => {
+          onboardingState = failedOnboardingState(error);
+          syncProjectOnboardingUi();
+        },
+      );
+      if (result) {
+        setSnapshot(result.snapshot);
+        onboardingState = result.status === "running"
+          ? progressOnboardingState({ stage: "running_organizer", progress: undefined, label: "Codex 正在整理项目知识", detail: `已选 ${result.selectedThreadCount} 个对话；完成后进入审核` })
+          : completedOnboardingState(result);
+        form.closest<HTMLDialogElement>("dialog")?.close();
+        form.reset();
+        detailsOpen = false;
+        render();
+        if (result.status !== "running") document.querySelector<HTMLDialogElement>("#project-progress-dialog")?.close();
+        toast(result.userActionRequired
+          ? `已选择 ${result.selectedThreadCount} 个对话，整理对话已打开；请发送已复制的整理指令`
+          : `已选择 ${result.selectedThreadCount} 个对话，Codex 正在整理，完成后等你确认`);
       }
       return;
     }
     const projectName = String(data.get("importName") || "").trim();
     if (!projectName) { toast("请填写 Codex 项目名称或简称", "error"); return; }
     onboardingState = progressOnboardingState({ stage: "starting", progress: 4, label: "正在准备…" });
-    syncProjectOnboardingUi();
+    showProjectProgressDialog();
     const result = await execute(
       () => window.harness.importCodexProject({ name: projectName, ...(projectImportTargetId ? { targetProjectId: projectImportTargetId } : {}), ...(projectImportSourceId ? { codexProjectId: projectImportSourceId } : {}) }),
       undefined,
@@ -890,7 +1044,9 @@ document.addEventListener("submit", async (event) => {
     );
     if (result) {
       setSnapshot(result.snapshot);
-      onboardingState = completedOnboardingState(result);
+      onboardingState = result.status === "running"
+        ? progressOnboardingState({ stage: "running_organizer", label: "Codex 正在按关键词整理项目", detail: "正在搜索相关对话和证据；完成后进入审核" })
+        : completedOnboardingState(result);
       if (onboardingState.status === "warning") {
         syncProjectOnboardingUi();
         form.closest<HTMLDialogElement>("dialog")?.addEventListener("close", () => {
@@ -905,7 +1061,10 @@ document.addEventListener("submit", async (event) => {
       projectImportSourceId = undefined;
       detailsOpen = false;
       render();
-      toast(`已定位 ${result.matchedProjectName || projectName}，Codex 项目回填已启动，完成后等待审核`);
+      if (result.status !== "running") document.querySelector<HTMLDialogElement>("#project-progress-dialog")?.close();
+       toast(result.userActionRequired
+         ? `已定位 ${result.matchedProjectName || projectName}，整理对话已打开；请发送已复制的整理指令`
+         : `已定位 ${result.matchedProjectName || projectName}，Codex 项目回填已启动，完成后等待审核`);
     }
     return;
   }
@@ -1018,22 +1177,6 @@ document.addEventListener("submit", async (event) => {
     }
     return;
   }
-  if (form.id === "conversation-form") {
-    const data = new FormData(form);
-    const result = await execute(() => window.harness.newProjectConversation(project.id, {
-      title: String(data.get("title") || ""),
-      type: String(data.get("type") || "warm") === "disposable" ? "disposable" : "warm",
-      agent: ["claude", "hermes"].includes(String(data.get("agent"))) ? String(data.get("agent")) as "claude" | "hermes" : "codex",
-    }));
-    if (result) {
-      setSnapshot(result.snapshot);
-      form.closest<HTMLDialogElement>("dialog")?.close();
-      form.reset();
-      renderPreservingUi();
-      toast(result.opened ? "项目新对话已打开" : "项目新对话已创建，请稍后重试打开", result.opened ? "ok" : "error");
-    }
-    return;
-  }
   if (form.id === "objective-form") {
     const data = new FormData(form);
     const result = await execute(() => window.harness.createObjective(project.id, {
@@ -1097,8 +1240,17 @@ window.harness.onProjectOnboardingProgress((progress) => {
 });
 
 window.harness.onAgentRuntimeUpdate((update) => {
-  if (!update?.snapshot) return;
-  if (hasActiveUserInteraction()) {
+   if (!update?.snapshot) return;
+  const selected = update.snapshot.state.projects.find((item) => item.id === update.snapshot.state.selectedProjectId);
+  if (selected?.codexImport?.status === "awaiting_review") {
+    onboardingState = { status: "completed" };
+    document.querySelector<HTMLDialogElement>("#project-progress-dialog")?.close();
+    toast("Codex 整理完成，等待你审核项目知识包");
+  } else if (selected?.codexImport?.status === "failed") {
+    onboardingState = failedOnboardingState(selected.codexImport.error || "Codex 整理失败");
+    syncProjectOnboardingUi();
+  }
+   if (hasActiveUserInteraction()) {
     pendingRuntimeSnapshot = update.snapshot;
     return;
   }

@@ -46,10 +46,10 @@ test("Codex project resolver does not require roots", () => {
 test("Codex root selection uses an exact semantic root and refuses unresolved multi-root Projects", () => {
   const multi = {
     id: "legacy-chat",
-    name: "聊天",
-    roots: [{ path: "E:\\_Codex项目\\聊天" }, { path: "E:\\Cloudflare\\my-workflow" }, { path: "E:\\_Codex项目\\账号运营" }],
+    name: "chat-project",
+    roots: [{ path: "C:\\fixture\\chat-project" }, { path: "C:\\fixture\\workflow-project" }, { path: "C:\\fixture\\operations-project" }],
   };
-  assert.equal(selectCodexProjectRoot({ project: multi, query: "聊天", matchedName: "聊天" }), "E:\\_Codex项目\\聊天");
+  assert.equal(selectCodexProjectRoot({ project: multi, query: "chat-project", matchedName: "chat-project" }), "C:\\fixture\\chat-project");
   assert.throws(() => selectCodexProjectRoot({
     project: { id: "amb", name: "Shared", roots: [{ path: "C:\\one" }, { path: "C:\\two" }] },
     query: "Shared",

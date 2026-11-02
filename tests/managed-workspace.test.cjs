@@ -35,3 +35,13 @@ test("managed workspace rejects empty and reserved Windows names", () => {
     assert.doesNotMatch(path.basename(result.path), /^CON$/i);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
+
+test("managed workspace can allocate beneath an already trusted root", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "aph-trusted-root-"));
+  try {
+    const result = createManagedWorkspace({ trustedRoot: root, name: "Project Harness 发布闭环" });
+    assert.equal(path.dirname(path.dirname(result.path)), root);
+    assert.equal(path.basename(path.dirname(result.path)), "harness-projects");
+    assert.match(path.basename(result.path), /^Project-Harness-/);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});

@@ -1,6 +1,4 @@
 import type { GitHubState, GitState, Project, Section, Snapshot, Task } from "./types";
-import { renderGuide } from "./guide-view.mjs";
-import { localizeAppHtml } from "./app-copy.mjs";
 
 const statusCopy: Record<string, string> = {
   backlog: "待整理",
@@ -12,6 +10,7 @@ const statusCopy: Record<string, string> = {
   changes_requested: "需修改",
   accepted: "已完成",
   failed: "执行失败",
+  timed_out: "已超时，可重试",
   user_action_required: "等待用户操作",
   stopped: "已停止",
 };
@@ -29,26 +28,20 @@ const phaseCopy: Record<string, string> = {
   completed: "已结束",
   awaiting_review: "等待审核",
   failed: "执行失败",
+  timed_out: "已超时",
 };
 
 function agentLabel(agent?: string): string {
   return agent === "claude" ? "Claude Code" : agent === "hermes" ? "Hermes" : "Codex";
 }
-
 function codexProjectCopy(project: Project): { title: string; detail: string } {
   const official = Boolean(project.codexProjectId && !String(project.codexProjectId).startsWith("local-"));
   if (!official) return { title: "等待同步", detail: "还没有可核对的官方 Codex Project。" };
   const state = project.codexProjectSync?.state;
   if (state === "desktop-restart-required") {
     return {
-      title: "官方 Project 已创建 · 待冷启动核对",
-      detail: project.codexProjectSync?.detail || "请完全退出 Codex Desktop 后重新打开，再核对侧栏。",
-    };
-  }
-  if (state === "app-server-confirmed") {
-    return {
-      title: "官方 Project 已确认 · 侧栏待核对",
-      detail: "app-server 已返回该 Project；当前 Desktop 侧栏仍需一次完全退出后的冷启动核对。",
+      title: "官方 Project 已创建 · 侧栏待核对",
+      detail: project.codexProjectSync?.detail || "请在现有 Codex Desktop 窗口刷新或手动核对侧栏。",
     };
   }
   if (state === "desktop-registered") {
@@ -78,6 +71,12 @@ function formatClock(value?: string): string {
   return Number.isNaN(date.valueOf()) ? "--:--" : date.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
 }
 
+function formatDateTime(value?: string): string {
+  if (!value) return "未记录";
+  const date = new Date(value);
+  return Number.isNaN(date.valueOf()) ? "未记录" : date.toLocaleString("zh-CN", { hour12: false });
+}
+
 function taskAction(task: Task, project?: Project): string {
   const workerSections = (project?.sections || []).filter((section) => section.kind !== "main" && !["closed", "archived"].includes(section.status));
   // Do not move a task while an Agent owns an active run. The assignment
@@ -87,31 +86,36 @@ function taskAction(task: Task, project?: Project): string {
   const assign = canAssign
     ? `<button class="text-action" data-action="assign-section" data-task="${escapeHtml(task.id)}">改派 Section</button>`
     : "";
-  if (["ready", "backlog", "changes_requested", "failed"].includes(task.status)) {
-    const dispatchLabel = task.workstream === "codex-project-import" ? "重试 Codex 回填" : task.agent === "codex" ? "开始任务（注入 Codex）" : "开始任务";
-    return `<div class="task-actions"><button class="action action--small" data-action="dispatch" data-task="${escapeHtml(task.id)}" data-guide-target="task-dispatch-${escapeHtml(task.id)}"${task.agent === "codex" ? ' aria-label="开始任务" title="开始任务后注入 Codex"' : ""}>${dispatchLabel}</button>${assign}</div>`;
+  if (["ready", "backlog", "changes_requested", "failed", "timed_out"].includes(task.status)) {
+    const dispatchLabel = task.status === "timed_out" ? "重试任务" : task.workstream === "codex-project-import" ? "重试 Codex 回填" : task.agent === "codex" ? "准备原生 Codex 任务" : "准备任务包";
+    return `<div class="task-actions"><button class="action action--small" data-action="dispatch" data-task="${escapeHtml(task.id)}" title="复制任务包后在原生 Agent 中发送；不会创建隐藏执行器">${dispatchLabel}</button>${assign}</div>`;
   }
   const open = task.run?.externalThreadId
     ? `<button class="text-action" data-action="open-agent" data-task="${escapeHtml(task.id)}">${["starting", "running"].includes(String(task.run.status || "").toLowerCase()) ? "打开项目入口" : "打开对话"}</button>`
     : "";
   if (task.workstream === "codex-project-import" && ["in_progress", "awaiting_result"].includes(task.status)) {
-    return `<div class="task-actions">${open}<button class="text-action" data-action="stop-task" data-task="${escapeHtml(task.id)}">停止回填</button></div>`;
+    return `<div class="task-actions">${open}<button class="text-action" data-action="copy-packet" data-task="${escapeHtml(task.id)}">复制整理指令</button><button class="text-action" data-action="stop-task" data-task="${escapeHtml(task.id)}">停止整理</button></div>`;
   }
-  const projectOpen = task.agent === "codex"
-    ? `<button class="text-action" data-action="open-codex-project">打开最近对话</button>`
-    : "";
-  if (!open && projectOpen) {
-    return `<div class="task-actions">${projectOpen}${assign}<span class="task-hint">旧任务未保存独立 thread，将按项目最近对话打开</span></div>`;
+  if (!open && task.agent === "codex" && !task.run?.userActionRequired) {
+    return `<div class="task-actions">${assign}<span class="task-hint">请在 Codex Project 中继续这个任务</span></div>`;
   }
   if (task.run?.userActionRequired && task.status !== "accepted") {
-    return `<div class="task-actions"><button class="text-action" data-action="open-workspace" data-task="${escapeHtml(task.id)}">打开工作区</button><button class="text-action" data-action="copy-packet" data-task="${escapeHtml(task.id)}">复制任务包</button><button class="action action--small" data-action="submit-result" data-task="${escapeHtml(task.id)}">提交结果</button><button class="text-action" data-action="stop-task" data-task="${escapeHtml(task.id)}">停止</button></div>`;
+    const nativeOpen = task.run.externalThreadId
+      ? `<button class="text-action" data-action="open-agent" data-task="${escapeHtml(task.id)}">打开对应对话</button>`
+      : task.agent === "codex"
+        ? '<span class="task-hint">请在 Codex Project 中新建对话</span>'
+        : `<button class="text-action" data-action="open-workspace" data-task="${escapeHtml(task.id)}">打开工作区</button>`;
+    const nativeHint = task.run.externalThreadId
+      ? "请在已打开的对应 Codex 对话中粘贴任务包并发送；Harness 不启动第二个执行器。"
+      : "请在原生 Agent 新建对话并粘贴发送；尚未开始执行。";
+    return `<div class="task-actions">${nativeOpen}<button class="text-action" data-action="copy-packet" data-task="${escapeHtml(task.id)}">复制任务包</button><button class="action action--small" data-action="submit-result" data-task="${escapeHtml(task.id)}">提交结果</button><button class="text-action" data-action="stop-task" data-task="${escapeHtml(task.id)}">取消等待</button><span class="task-hint">${nativeHint}</span></div>`;
   }
   if (task.status === "in_progress" || task.status === "awaiting_result") {
     return `<div class="task-actions">${open}<button class="text-action" data-action="copy-packet" data-task="${escapeHtml(task.id)}">复制任务包</button><button class="action action--small" data-action="submit-result" data-task="${escapeHtml(task.id)}">${task.status === "awaiting_result" ? "补交结果" : "提交结果"}</button><button class="text-action" data-action="stop-task" data-task="${escapeHtml(task.id)}">停止</button></div>`;
   }
   if (task.status === "review") {
     const automated = task.review?.status === "approved" && task.review?.automatic === true;
-    return `<div class="task-actions">${open}<span class="task-hint">${automated ? "Review Agent 自动审核中" : "等待你的确认"}</span></div>`;
+    return `<div class="task-actions">${open}<span class="task-hint">${automated ? "旧版自动判定，未验证独立审核" : "等待你的确认"}</span></div>`;
   }
   return `<div class="task-actions">${open}${assign}<span class="task-hint task-hint--done">已写入项目进展</span></div>`;
 }
@@ -120,11 +124,10 @@ function renderRuntime(task: Task): string {
   const run = task.run;
   if (!run || (task.status === "review" && !run.status)) return "";
   const phase = run.phase || (run.status === "failed" ? "failed" : "queued");
-  const progress = Math.max(0, Math.min(100, Number(run.progress) || 0));
   const event = run.lastEvent ? ` · ${run.lastEvent}` : "";
-  const process = run.processId ? `PID ${run.processId}` : "进程已记录";
+  const process = run.userActionRequired ? "等待原生 Agent 中发送" : run.processId ? `记录的 PID ${run.processId}` : "未收到进程信息";
   const thread = run.externalThreadId ? ` · thread ${run.externalThreadId}` : "";
-  return `<div class="task-runtime" aria-label="Agent 运行态"><div class="task-runtime__line"><span>${escapeHtml(phaseCopy[phase] || phase)}</span><b>${progress}%</b></div><div class="task-runtime__bar"><i style="width:${progress}%"></i></div><small>${escapeHtml(process)} · ${run.eventCount || 0} 个事件${escapeHtml(thread)}${escapeHtml(event)}${run.transcriptPath ? ` · <button class="text-action" data-action="open-run-archive" data-task="${escapeHtml(task.id)}">打开运行归档</button>` : ""}</small></div>`;
+  return `<div class="task-runtime" aria-label="Agent 运行态"><div class="task-runtime__line"><span>${escapeHtml(phaseCopy[phase] || phase)}</span><b>总工作量未知</b></div><small>${escapeHtml(process)} · ${run.eventCount || 0} 个已观察事件${run.lastEventAt ? ` · 最近事件 ${formatClock(run.lastEventAt)}` : ""}${escapeHtml(thread)}${escapeHtml(event)}${run.transcriptPath ? ` · <button class="text-action" data-action="open-run-archive" data-task="${escapeHtml(task.id)}">打开运行归档</button>` : ""}</small></div>`;
 }
 
 function renderTask(task: Task, project?: Project): string {
@@ -136,7 +139,7 @@ function renderTask(task: Task, project?: Project): string {
   const section = project?.sections?.find((item) => item.id === task.sectionId);
   const dependencyIds = Array.isArray(task.dependsOn) ? task.dependsOn : String(task.dependsOn || "").split(/[\s,]+/).filter(Boolean);
   const unmet = dependencyIds.map((id) => project?.tasks?.find((item) => item.id === id)).filter((item) => item && item.status !== "accepted");
-  const failure = task.status === "failed" ? String(task.run?.error || task.launchError || "").trim() : "";
+  const failure = ["failed", "timed_out"].includes(task.status) ? String(task.run?.error || task.run?.timeoutReason || task.launchError || "").trim() : "";
   return `<article class="task-row task-row--${escapeHtml(task.status)}">
     <div class="task-copy">
       <div class="task-title-line"><h3>${escapeHtml(task.title)}</h3><span class="priority priority--${escapeHtml(task.priority || "normal")}">${priorityCopy[task.priority || "normal"]}</span><span class="status status--${escapeHtml(task.status)}">${statusCopy[task.status] || escapeHtml(task.status)}</span></div>
@@ -185,12 +188,12 @@ function renderReviewCard(task: Task, acceptanceBlocked = false): string {
       ? "Review Agent 后台审核中"
       : isImport ? "Codex 回填候选 · 等待你的确认" : "等待你的确认";
   const reviewActions = acceptanceBlocked
-    ? `<div class="review-actions"><button class="action action--quiet" data-action="reject" data-task="${escapeHtml(task.id)}" data-guide-target="review-reject">拒绝结果</button><button class="action action--quiet" data-action="request-changes" data-task="${escapeHtml(task.id)}">退回修改</button><span class="task-hint">恢复可信状态后才能接受。</span></div>`
+    ? `<div class="review-actions"><button class="action action--quiet" data-action="reject" data-task="${escapeHtml(task.id)}">拒绝结果</button><button class="action action--quiet" data-action="request-changes" data-task="${escapeHtml(task.id)}">退回修改</button><span class="task-hint">恢复可信状态后才能接受。</span></div>`
     : automatic
     ? `<div class="review-actions"><span class="task-hint task-hint--done">审核与回写由 Review Agent 自动完成，无需用户确认。</span></div>`
     : isImport
-      ? `<div class="review-actions"><button class="action action--quiet" data-action="reject" data-task="${escapeHtml(task.id)}" data-guide-target="review-reject">拒绝导入</button><button class="action action--quiet" data-action="request-changes" data-task="${escapeHtml(task.id)}">重新盘点</button><button class="action action--accept" data-action="accept" data-task="${escapeHtml(task.id)}" data-guide-target="review-accept">接受并写入 Harness</button></div>`
-      : `<div class="review-actions"><button class="action action--quiet" data-action="reject" data-task="${escapeHtml(task.id)}" data-guide-target="review-reject">拒绝结果</button><button class="action action--quiet" data-action="request-changes" data-task="${escapeHtml(task.id)}">退回修改</button><button class="action action--accept" data-action="accept" data-task="${escapeHtml(task.id)}" data-guide-target="review-accept">接受并推进 HEAD</button></div>`;
+      ? `<div class="review-actions"><button class="action action--quiet" data-action="reject" data-task="${escapeHtml(task.id)}">拒绝导入</button><button class="action action--quiet" data-action="request-changes" data-task="${escapeHtml(task.id)}">重新盘点</button><button class="action action--accept" data-action="accept" data-task="${escapeHtml(task.id)}">接受并写入 Harness</button></div>`
+      : `<div class="review-actions"><button class="action action--quiet" data-action="reject" data-task="${escapeHtml(task.id)}">拒绝结果</button><button class="action action--quiet" data-action="request-changes" data-task="${escapeHtml(task.id)}">退回修改</button><button class="action action--accept" data-action="accept" data-task="${escapeHtml(task.id)}">接受并推进 HEAD</button></div>`;
   const importMeta = isImport ? `<p class="review-import-meta">${importedCounts ? `本次候选包含：${escapeHtml(importedCounts)}。` : "候选已通过结构化协议校验。"} 原始 transcript 在模型上下文外独立归档，确认后才会合并到项目。</p>` : "";
   return `<section class="review-block">
     <div class="review-kicker"><span class="review-signal">${reviewSignal}</span><span>基于 HEAD R${task.run?.baseRevision ?? task.baseRevision}</span></div>
@@ -207,12 +210,36 @@ function renderReviewCard(task: Task, acceptanceBlocked = false): string {
   </section>`;
 }
 
+function renderKnowledgeCandidate(candidate: NonNullable<Project["knowledgeCandidates"]>[number], acceptanceBlocked = false): string {
+  const isPlaybook = candidate.type === "playbook";
+  const sources = candidate.type === "rule"
+    ? candidate.sources
+    : (candidate.steps || []).flatMap((step) => Array.isArray(step.sources) ? step.sources : []);
+  const sourceRows = sources.slice(0, 8).map((source) => `<li><blockquote>${escapeHtml(source.quote || "未提供原话")}</blockquote><small>${escapeHtml(source.threadId || "未知对话")} · ${escapeHtml(source.turnId || source.evidenceId || "未知轮次")}</small></li>`).join("");
+  const steps = isPlaybook ? (candidate.steps || []).slice(0, 16).map((step, index) => `<li><b>${Number(step.order || index + 1)}</b><span>${escapeHtml(step.action)}${step.validation ? `<small>验证：${escapeHtml(step.validation)}</small>` : ""}${step.failure ? `<small>失败处理：${escapeHtml(step.failure)}</small>` : ""}</span></li>`).join("") : "";
+  const body = isPlaybook ? candidate.purpose : candidate.statement;
+  const actions = acceptanceBlocked
+    ? `<div class="review-actions"><button class="action action--quiet" data-action="reject-knowledge" data-knowledge="${escapeHtml(candidate.id)}">拒绝候选</button><span class="task-hint">恢复可信状态后才能接受。</span></div>`
+    : `<div class="review-actions"><button class="action action--quiet" data-action="reject-knowledge" data-knowledge="${escapeHtml(candidate.id)}">拒绝候选</button><button class="action action--accept" data-action="accept-knowledge" data-knowledge="${escapeHtml(candidate.id)}">接受并纳入项目</button></div>`;
+  return `<section class="review-block review-block--knowledge">
+    <div class="review-kicker"><span class="review-signal">${isPlaybook ? "Playbook 候选" : "用户规则候选"}</span><span>${escapeHtml(candidate.scope || "project")} · ${escapeHtml(candidate.confidence || "medium")}</span></div>
+    <h2>${escapeHtml(candidate.title || (isPlaybook ? "未命名 Playbook" : "未命名规则"))}</h2>
+    <p class="review-summary">${escapeHtml(body || "没有候选内容")}</p>
+    ${candidate.type === "rule" && candidate.rationale ? `<p class="review-knowledge-rationale"><b>为什么：</b>${escapeHtml(candidate.rationale)}</p>` : ""}
+    ${candidate.trigger ? `<p class="review-knowledge-trigger"><b>何时使用：</b>${escapeHtml(candidate.trigger)}</p>` : ""}
+    ${steps ? `<ol class="knowledge-step-list">${steps}</ol>` : ""}
+    <details class="review-details" data-preserve-key="knowledge-sources-${escapeHtml(candidate.id)}"><summary data-preserve-focus-key="knowledge-sources-${escapeHtml(candidate.id)}">查看用户原话与来源 · ${sources.length}</summary><ul class="knowledge-source-list">${sourceRows || "<li>没有可显示的来源</li>"}</ul></details>
+    ${actions}
+  </section>`;
+}
+
 function renderReview(project: Project, acceptanceBlocked = false): string {
   const tasks = (project.tasks || []).filter((item) => item.status === "review" && item.candidate).slice(0, 6);
-  if (!tasks.length) {
+  const knowledge = (project.knowledgeCandidates || []).filter((item) => item.status === "pending").slice(0, 8);
+  if (!tasks.length && !knowledge.length) {
     return `<section class="review-empty" aria-label="审核状态"><span class="state-dot"></span><div><strong>目前没有需要确认的结果</strong><p>普通任务结果到达后会等待人工审核；只有接受才推进 Project HEAD。</p></div></section>`;
   }
-  return tasks.map((task) => renderReviewCard(task, acceptanceBlocked)).join("");
+  return `${tasks.map((task) => renderReviewCard(task, acceptanceBlocked)).join("")}${knowledge.map((candidate) => renderKnowledgeCandidate(candidate, acceptanceBlocked)).join("")}`;
 }
 
 function renderGit(git: GitState | undefined): string {
@@ -251,6 +278,13 @@ function renderArchives(snapshot: Snapshot, project: Project): string {
   return `<ul class="archive-list">${manifests.map((item) => `<li><div><strong>${escapeHtml(item.label || item.sourceName || item.id)}</strong><small>${escapeHtml(String(item.format || "text"))} · ${Number(item.bytes || 0).toLocaleString()} bytes · ${escapeHtml(String(item.sha256 || "").slice(0, 16))}…</small></div><div class="archive-row-actions">${item.sha256 ? `<button class="text-action" data-action="verify-archive" data-hash="${escapeHtml(item.sha256)}">校验</button>` : ""}${item.deduplicated ? `<i class="session-state">复用</i>` : ""}</div></li>`).join("")}</ul>`;
 }
 
+function renderKnowledgeLibrary(project: Project): string {
+  const rules = (project.ruleCards || []).filter((item) => item.status === "active").slice(0, 8);
+  const playbooks = (project.playbooks || []).filter((item) => item.status === "active").slice(0, 8);
+  if (!rules.length && !playbooks.length) return `<div class="empty-signal"><strong>还没有已确认的工作规则</strong><span>从对话提炼出的规则和 Playbook 需要你审核后才会在这里出现。</span></div>`;
+  return `<ul class="knowledge-library">${rules.map((item) => `<li><span class="section-kind">规则</span><div><strong>${escapeHtml(item.title)}</strong><small>${escapeHtml(item.statement)}</small></div><i class="session-state">${escapeHtml(item.kind)}</i></li>`).join("")}${playbooks.map((item) => `<li><span class="section-kind">SOP</span><div><strong>${escapeHtml(item.title)} <em>v${Number(item.version || 1)}</em></strong><small>${escapeHtml(item.trigger)} · ${(item.steps || []).length} 步</small></div><i class="session-state">${escapeHtml(item.scope)}</i></li>`).join("")}</ul>`;
+}
+
 function codexMemberCount(project: Project): number {
   const ids = new Set<string>();
   (project.sessions || []).forEach((session) => { if (session.agent === "codex" && session.externalThreadId) ids.add(session.externalThreadId); });
@@ -258,12 +292,21 @@ function codexMemberCount(project: Project): number {
   return ids.size;
 }
 
+function isTaskActuallyRunning(task: Task): boolean {
+  const run = task.run;
+  if (!run || run.userActionRequired || !run.externalThreadId) return false;
+  if (!["starting", "running"].includes(String(run.status || "").toLowerCase())) return false;
+  // Project creation and thread materialization are preparation states. They
+  // become a visible Agent run only after a real turn/process is attached.
+  return Boolean(run.externalTurnId || run.processId);
+}
+
 function renderProjectList(snapshot: Snapshot): string {
-  return snapshot.state.projects.map((project, index) => {
+  return snapshot.state.projects.filter((project) => project.status !== "archived").map((project, index) => {
     const active = project.id === snapshot.state.selectedProjectId;
     const tasks = project.tasks || [];
     const waiting = tasks.filter((task) => task.status === "review").length;
-    const running = tasks.filter((task) => ["in_progress", "awaiting_result"].includes(task.status)).length;
+    const running = tasks.filter(isTaskActuallyRunning).length;
     return `<button class="project-item ${active ? "project-item--active" : ""} ${project.status === "archived" ? "project-item--archived" : ""}" data-action="select-project" data-project="${escapeHtml(project.id)}">
       <span class="project-number">${String(index + 1).padStart(2, "0")}</span>
       <span class="project-item-copy"><strong>${escapeHtml(project.name)}</strong><small>HEAD R${project.revision} · ${escapeHtml(project.status === "archived" ? "已归档" : project.status === "paused" ? "已暂停" : project.status === "blocked" ? "已阻塞" : "进行中")}${snapshot.git?.[project.id]?.dirty ? " · Git 有变更" : ""}${running ? ` · ${running} 个运行中` : waiting ? ` · ${waiting} 项待确认` : ""}</small></span>
@@ -285,26 +328,45 @@ function renderTimeline(project: Project): string {
   return `<section class="timeline"><div class="section-title"><div><span class="eyebrow">PROJECT LEDGER</span><h2>进展轨迹</h2></div><span>最近 ${checkpoints.length} 个 checkpoint</span></div><ol>${checkpoints.map((checkpoint) => `<li><span class="timeline-marker">R${checkpoint.revision}</span><div><strong>${escapeHtml(checkpoint.summary)}</strong><small>${formatClock(checkpoint.acceptedAt)}${checkpoint.nextStep ? ` · 下一步：${escapeHtml(checkpoint.nextStep)}` : ""}</small></div></li>`).join("")}</ol></section>`;
 }
 
+function renderArchivedProjectsDialog(snapshot: Snapshot): string {
+  const archived = snapshot.state.projects.filter((project) => project.status === "archived");
+  const rows = archived.map((project) => `<li class="archived-project-row"><div><strong>${escapeHtml(project.name)}</strong><small>归档于 ${escapeHtml(formatDateTime(project.archive?.archivedAt))}${project.archive?.reason ? ` · 原因：${escapeHtml(project.archive.reason)}` : ""}</small></div><button class="action action--small action--accept" data-action="restore-project" data-project="${escapeHtml(project.id)}">恢复项目</button></li>`).join("");
+  return `<dialog id="archived-projects-dialog" class="acid-dialog acid-dialog--archived"><div class="dialog-title"><span>已归档项目（${archived.length}）</span><button type="button" data-close aria-label="关闭">×</button></div><p class="dialog-help">归档项目不会出现在主页；原始目录、Codex Project、对话和运行证据都会保留。恢复后会重新出现在主页。</p>${rows ? `<ul class="archived-project-list">${rows}</ul>` : `<div class="empty-signal"><strong>暂无已归档项目</strong><span>项目归档后会在这里保留并可恢复。</span></div>`}</dialog>`;
+}
+
 function renderDetailsDrawer(snapshot: Snapshot, project: Project, git: GitState | undefined, github: GitHubState | undefined, open: boolean): string {
   const sessionStatusCopy: Record<string, string> = { warm: "可复用", executing: "执行中", awaiting_review: "等待审核", awaiting_result: "待回写", retired: "已结束" };
   const projectSessions = project.sessions || [];
   const sessions = projectSessions.map((session) => {
     const role = session.role === "cto" ? "CTO" : session.role === "review" ? "Review" : session.role === "conversation" ? "讨论" : agentLabel(session.agent);
     const description = session.role === "cto"
-      ? `用户主入口 · ${project.contextPackets?.cto ? "上下文待发送" : "上下文待生成"}`
+      ? `用户主入口 · ${session.externalThreadStatus === "ready" ? "Desktop 原生线程已绑定" : project.contextPackets?.cto ? "上下文待发送" : "上下文待生成"}`
       : session.role === "review"
-        ? "后台自动审核 · 上下文自动限长"
+        ? session.externalThreadStatus === "ready" ? "Desktop 原生线程已绑定 · 形式检查不会推进 HEAD" : "标准审核入口待发送首条消息 · 形式检查不会推进 HEAD"
         : `${session.type === "disposable" ? "一次性" : session.role === "conversation" ? "可继续对话" : "复用工作流"} · 游标 R${session.cursor}`;
+    const threadStatus = session.externalThreadStatus === "pending"
+      ? "待发送首条消息"
+      : session.externalThreadStatus === "bound"
+        ? "已记录线程 · 待原生核验"
+      : session.externalThreadStatus === "ready"
+        ? "已绑定 Desktop 原生线程"
+      : session.externalThreadStatus === "failed"
+        ? "核验失败，可重试"
+        : undefined;
     const action = session.role === "cto"
       ? `<button class="text-action session-open" data-action="open-cto">进入 CTO</button>`
       : session.role === "review"
-        ? `<span class="session-background">后台运行</span>`
+        ? session.externalThreadId
+          ? `<button class="text-action session-open" data-action="open-session" data-session="${escapeHtml(session.id)}">打开</button>`
+          : session.externalThreadStatus === "pending"
+            ? `<button class="text-action session-open" data-action="open-session" data-session="${escapeHtml(session.id)}">打开待发送入口</button>`
+            : `<span class="session-background">尚未请求</span>`
         : session.externalThreadId
           ? `<button class="text-action session-open" data-action="open-session" data-session="${escapeHtml(session.id)}">打开</button>`
           : session.role === "conversation"
             ? `<button class="text-action session-open" data-action="open-session" data-session="${escapeHtml(session.id)}">打开工作区</button>`
             : "";
-    return `<li class="session-row"><span class="session-agent">${role}</span><span><strong>${escapeHtml(session.title || session.workstream)}</strong><small>${escapeHtml(session.workstream)} · ${escapeHtml(description)}</small></span><i class="session-state session-state--${escapeHtml(session.status)}">${escapeHtml(sessionStatusCopy[session.status] || session.status)}</i>${action}</li>`;
+    return `<li class="session-row"><span class="session-agent">${role}</span><span><strong>${escapeHtml(session.title || session.workstream)}</strong><small>${escapeHtml(session.workstream)} · ${escapeHtml(threadStatus || description)}${session.externalThreadError ? ` · ${escapeHtml(session.externalThreadError)}` : ""}</small></span><i class="session-state session-state--${escapeHtml(session.status)}">${escapeHtml(threadStatus || sessionStatusCopy[session.status] || session.status)}</i>${action}</li>`;
   }).join("");
   const codexCopy = codexProjectCopy(project);
   return `<button class="drawer-scrim ${open ? "drawer-scrim--open" : ""}" data-action="close-details" aria-label="关闭项目详情" tabindex="${open ? "0" : "-1"}"></button>
@@ -312,20 +374,20 @@ function renderDetailsDrawer(snapshot: Snapshot, project: Project, git: GitState
       <div class="drawer-head"><div><span class="eyebrow">PROJECT DETAILS</span><h2>项目详情</h2></div><button class="icon-button" data-action="close-details" aria-label="关闭项目详情">×</button></div>
       <div class="drawer-scroll">
         <section class="drawer-section project-facts"><div class="drawer-section-title"><div><span class="eyebrow">项目位置</span><strong>${escapeHtml(project.name)}</strong></div><button class="text-action" data-action="edit-contract">编辑契约</button></div><code title="${escapeHtml(project.path)}">${escapeHtml(project.path)}</code><div><span>Project HEAD</span><b>R${project.revision}</b></div><div><span>项目状态</span><b>${escapeHtml(projectStatusCopy[project.status] || project.status || "进行中")}</b></div><div><span>当前 Objective</span><b>${escapeHtml(objectiveStatusCopy[project.objective?.status || "active"] || project.objective?.status || "进行中")}</b></div><button class="text-action drawer-path-action" data-action="open-project-path">打开项目目录</button>${project.objective?.status === "active" ? `<button class="text-action drawer-path-action" data-action="complete-objective">标记 Objective 已完成</button>` : ""}<button class="text-action drawer-path-action" data-action="new-objective">切换 Objective</button></section>
-        <section class="drawer-section project-facts"><span class="eyebrow">Codex Project</span><strong>${escapeHtml(codexCopy.title)}</strong><small>${escapeHtml(codexCopy.detail)} CTO、Review 和后续任务对话会归入这个 Codex 项目。当前已记录 ${codexMemberCount(project)} 个成员对话（2+N）。${project.codexProjectId ? ` ID：${escapeHtml(project.codexProjectId)}` : ""}${project.codexImport ? ` 导入状态：${escapeHtml(project.codexImport.status === "awaiting_review" ? "待审核" : project.codexImport.status === "running" ? "Agent 盘点中" : project.codexImport.status === "completed" ? "已完成" : project.codexImport.status === "failed" ? "失败可重试" : "排队中")}${project.codexImport.sourceLatestAt ? ` · Agent 最新 checkpoint：${escapeHtml(project.codexImport.sourceLatestAt)}` : ""}` : ""}</small>${project.codexSyncError ? `<div class="onboarding-feedback onboarding-feedback--error" role="alert"><strong>上次连接未完成：${escapeHtml(project.codexSyncError.message)}</strong><small>阶段：${escapeHtml(project.codexSyncError.stage)} · ${escapeHtml(formatClock(project.codexSyncError.at))}</small></div>` : ""}<div class="drawer-inline-actions">${project.source?.kind === "blank" || project.codexProjectId ? `<button class="text-action" data-action="import-into-project">${project.codexProjectId ? "从 Codex 刷新项目" : "从 Codex 回填到此项目"}</button>` : ""}<button class="text-action" data-action="sync-codex">${project.codexSyncError ? "重试连接 Codex" : "同步 Project"}</button><button class="text-action" data-action="new-conversation">新建项目对话</button></div></section>
-        <section class="drawer-section project-facts"><span class="eyebrow">持久化数据盘</span><strong>${escapeHtml(snapshot.storage?.root || "当前用户数据目录")}</strong><small>状态与 JSONL 回放日志会在每次状态变更后原子写入。</small>${snapshot.storage?.harnessCliPath ? `<code class="runtime-path" title="${escapeHtml(snapshot.storage.harnessCliPath)}">Agent CLI：${escapeHtml(snapshot.storage.harnessCliPath)}</code>` : ""}</section>
+        <section class="drawer-section project-facts"><span class="eyebrow">Codex Project</span><strong>${escapeHtml(codexCopy.title)}</strong><small>${escapeHtml(codexCopy.detail)} CTO、Review 和后续任务对话会归入这个 Codex 项目。当前已记录 ${codexMemberCount(project)} 个成员对话（2+N）。${project.codexProjectId ? ` ID：${escapeHtml(project.codexProjectId)}` : ""}${project.codexImport ? ` 导入状态：${escapeHtml(project.codexImport.status === "preparing" ? "准备中" : project.codexImport.status === "awaiting_review" ? "待审核" : project.codexImport.status === "running" ? "Codex 整理中" : project.codexImport.status === "completed" ? "已完成" : project.codexImport.status === "failed" ? "失败可重试" : "排队中")}${project.codexImport.sourceLatestAt ? ` · Codex 最新 checkpoint：${escapeHtml(project.codexImport.sourceLatestAt)}` : ""}` : ""}</small>${project.codexSyncError ? `<div class="onboarding-feedback onboarding-feedback--error" role="alert"><strong>上次连接未完成：${escapeHtml(project.codexSyncError.message)}</strong><small>阶段：${escapeHtml(project.codexSyncError.stage)} · ${escapeHtml(formatClock(project.codexSyncError.at))}</small></div>` : ""}<div class="drawer-inline-actions">${project.source?.kind === "blank" || project.codexProjectId ? `<button class="text-action" data-action="import-into-project">${project.codexProjectId ? "从 Codex 刷新项目" : "从 Codex 回填到此项目"}</button>` : ""}<button class="text-action" data-action="sync-codex">${project.codexSyncError ? "重试连接 Codex" : "同步 Project"}</button></div></section>
+        <section class="drawer-section project-facts"><span class="eyebrow">持久化数据盘</span><strong>${escapeHtml(snapshot.storage?.root || "当前用户数据目录")}</strong><small>状态与 JSONL 回放日志会在每次状态变更后原子写入。Codex 只通过 Desktop 原生深链和内置交接面交接。</small></section>
         <section class="drawer-section project-facts"><div class="drawer-section-title"><div><span class="eyebrow">开发环境画像</span><strong>${escapeHtml(project.profile?.stack?.join(" · ") || project.techStack?.join(" · ") || "尚未检测")}</strong></div><button class="icon-button icon-button--small" data-action="refresh-profile" aria-label="刷新开发环境画像">↻</button></div><small>${project.profile?.packageManager ? `包管理器：${escapeHtml(project.profile.packageManager)} · ` : ""}${project.profile?.entrypoints?.length ? `入口：${escapeHtml(project.profile.entrypoints.slice(0, 4).join("、"))}` : "接入时会自动扫描常见入口"}</small></section>
         <section class="drawer-section project-facts"><span class="eyebrow">项目健康</span><strong>${snapshot.health?.[project.id]?.status === "ok" ? "正常" : "需要关注"}</strong><small>${snapshot.health?.[project.id]?.failures?.includes("codexProject") ? "Codex Project 已写入，但 Desktop 归组证据尚未完成。" : snapshot.health?.[project.id]?.failures?.length ? `缺少：${escapeHtml(snapshot.health[project.id].failures.join("、"))}` : "状态、上下文、Ledger 和事实索引均可读取"}</small></section>
         <section class="drawer-section"><div class="drawer-section-title"><div><span class="eyebrow">版本状态</span><h3>Git</h3></div><button class="icon-button icon-button--small" data-action="refresh-git" aria-label="刷新 Git">↻</button></div>${renderGit(git)}</section>
         <section class="drawer-section"><div class="drawer-section-title"><div><span class="eyebrow">远端协作</span><h3>GitHub</h3></div><button class="icon-button icon-button--small" data-action="refresh-github" aria-label="刷新 GitHub">↻</button></div>${renderGitHub(github)}</section>
         <section class="drawer-section"><div class="drawer-section-title"><div><span class="eyebrow">任务容器</span><h3>Sections</h3></div><button class="text-action" data-action="new-section">新建</button></div>${renderSections(project)}</section>
         <section class="drawer-section"><div class="drawer-section-title"><div><span class="eyebrow">工程记忆</span><h3>决策</h3></div><button class="text-action" data-action="new-decision">记录</button></div><ul class="decision-list">${(project.decisions || []).slice(0, 6).map((decision) => `<li><strong>${escapeHtml(typeof decision === "string" ? decision : decision.title || decision.summary || decision.detail)}</strong><small>${escapeHtml(typeof decision === "string" ? "" : decision.status || "proposed")}</small></li>`).join("") || "<li class=\"empty-row\">还没有结构化决策</li>"}</ul></section>
+        <section class="drawer-section"><div class="drawer-section-title"><div><span class="eyebrow">可执行经验</span><h3>规则与 Playbook</h3></div><b>${(project.ruleCards || []).filter((item) => item.status === "active").length + (project.playbooks || []).filter((item) => item.status === "active").length}</b></div>${renderKnowledgeLibrary(project)}</section>
         <section class="drawer-section"><div class="drawer-section-title"><div><span class="eyebrow">审计</span><h3>最近事件</h3></div><b>${project.events?.length || 0}</b></div><ul class="event-list">${(project.events || []).slice(0, 8).map((event) => `<li><span>${escapeHtml(formatClock(event.at))}</span><strong>${escapeHtml(event.detail || event.type)}</strong></li>`).join("") || "<li class=\"empty-row\">暂无事件</li>"}</ul></section>
         <section class="drawer-section"><div class="drawer-section-title"><div><span class="eyebrow">无损存储</span><h3>会话归档</h3></div><b>${(snapshot.archives?.[project.id] || project.archiveManifests || []).length}</b></div>${renderArchives(snapshot, project)}</section>
         <section class="drawer-section"><div class="drawer-section-title"><div><span class="eyebrow">桌面显示</span><h3>面板置顶</h3></div><button class="action action--quiet" data-action="toggle-pin">${snapshot.window?.alwaysOnTop ? "取消置顶" : "置顶"}</button></div><small class="drawer-note">置顶只影响 Harness 自己的窗口，不会抢焦点或影响其他 Agent。</small></section>
         <section class="drawer-section"><span class="eyebrow">可用 Agent</span><div class="agent-list">${(["codex", "claude", "hermes"] as const).map((agent) => `<div class="agent-row" title="${escapeHtml(snapshot.agents?.[agent]?.capabilities?.join("、") || "无能力清单")}"><span class="agent-light ${snapshot.agents?.[agent]?.installed ? "agent-light--on" : ""}"></span><strong>${agentLabel(agent)}</strong><small>${snapshot.agents?.[agent]?.installed ? `${snapshot.agents[agent].mode || "已检测"}` : "未找到"}</small></div>`).join("")}</div></section>
         <section class="drawer-section"><div class="drawer-section-title"><div><span class="eyebrow">上下文容器</span><h3>会话</h3></div><b>${projectSessions.length}</b></div><ul class="session-list">${sessions || "<li class=\"empty-row\">还没有会话</li>"}</ul></section>
-        <section class="drawer-section drawer-actions"><span class="eyebrow">项目工具 · ${project.archiveManifests?.length || 0} 个归档</span><div class="drawer-action-grid"><button class="action action--quiet" data-action="open-ledger">打开动态白皮书</button><button class="action action--quiet" data-action="import-archive">导入会话归档</button><button class="action action--quiet" data-action="open-archive">查看归档目录</button><button class="action action--quiet" data-action="export-project">导出项目包</button><button class="action action--quiet" data-action="import-project">导入项目包</button><button class="action action--quiet" data-action="apply-template">套用项目模板</button>${project.status === "archived" ? `<button class="action action--accept" data-action="restore-project">恢复项目</button>` : `<button class="action action--quiet" data-action="archive-project">归档项目</button>`}${project.status === "active" ? `<button class="action action--quiet" data-action="pause-project">暂停项目</button>` : project.status === "paused" ? `<button class="action action--accept" data-action="resume-project">恢复运行</button>` : ""}</div><small class="drawer-note">归档只改变 Harness 项目状态，不删除 Git、Codex 对话或原始归档。</small></section>
       </div>
     </aside>`;
 }
@@ -341,30 +403,23 @@ function renderDependencyOptions(project: Project | undefined): string {
 }
 
 export function renderApp(snapshot: Snapshot, detailsOpen = false): string {
-  const locale = snapshot.guide?.locale === "en" ? "en" : "zh-CN";
   const safeRecovery = snapshot.state.recovery?.mode === "safe-recovery" && snapshot.state.recovery?.status === "unrecoverable";
   const recoveryBanner = safeRecovery
-    ? `<section class="recovery-banner" role="alert"><strong>${locale === "en" ? "Safe recovery mode" : "安全恢复模式"}</strong><p>${locale === "en" ? "An existing profile could not be recovered. Harness kept the damaged source and did not present an empty state as the original project." : "检测到既有状态但无法恢复。损坏原件已保留，也没有把空状态当作原项目。"}</p></section>`
+    ? `<section class="recovery-banner" role="alert"><strong>安全恢复模式</strong><p>检测到既有状态但无法恢复。损坏原件已保留，也没有把空状态当作原项目。</p></section>`
     : "";
-  const protectedValues = snapshot.state.projects.flatMap((item) => [
-    item.name, item.goal, item.objective?.title,
-    ...(item.tasks || []).flatMap((task) => [task.title, task.workstream, ...(task.criteria || []), task.candidate?.summary, task.candidate?.nextStep]),
-    ...(item.sections || []).map((section) => section.name),
-    ...(item.events || []).map((event) => event.detail),
-  ]).filter(Boolean);
-  const project = snapshot.state.projects.find((item) => item.id === snapshot.state.selectedProjectId) || snapshot.state.projects[0];
-  const guide = renderGuide(snapshot.guide || {}, snapshot.guideRecommendation || {});
-  if (!project) return localizeAppHtml(`<div class="app-shell app-shell--empty"><main class="fatal-empty">${recoveryBanner}<span class="brand-code">APH</span><h1>先建个项目吧</h1><p>这里只保存名称和目标，不会连接 Codex，也不会读取代码或历史记录。</p><button class="action action--accept" data-action="add-project" data-guide-target="project-create-blank">新建项目</button>${renderDialogs(snapshot)}<div id="toast" class="toast" role="status" aria-live="polite"></div></main>${guide}</div>`, locale, protectedValues);
+  const project = snapshot.state.projects.find((item) => item.id === snapshot.state.selectedProjectId && item.status !== "archived")
+    || snapshot.state.projects.find((item) => item.status !== "archived");
+  if (!project) return `<div class="app-shell app-shell--empty"><main class="fatal-empty">${recoveryBanner}<span class="brand-code">APH</span><h1>先建个项目吧</h1><p>创建空白项目会建立官方 Codex Project 并打开 CTO；关键词和手动选对话会启动整理。</p><div class="empty-actions"><button class="action action--accept" data-action="add-project">新建项目</button><button class="action action--quiet" data-action="open-archived-projects">查看已归档项目（${snapshot.state.projects.filter((item) => item.status === "archived").length}）</button><button class="action action--quiet" data-action="import-project">导入 / 恢复项目包</button></div>${renderDialogs(snapshot)}<div id="toast" class="toast" role="status" aria-live="polite"></div></main></div>`;
   const projectTasks = project.tasks || [];
   const accepted = projectTasks.filter((task) => task.status === "accepted").length;
   const waiting = projectTasks.filter((task) => task.status === "review").length;
-  const running = projectTasks.filter((task) => ["in_progress", "awaiting_result"].includes(task.status)).length;
+  const running = projectTasks.filter(isTaskActuallyRunning).length;
   const git = snapshot.git?.[project.id] || project.gitSnapshot;
   const github = snapshot.github?.[project.id] || project.githubSnapshot;
   const activeProjectCount = snapshot.state.projects.filter((item) => item.status !== "archived").length;
-  return localizeAppHtml(`<div class="app-shell">
-    <header class="topbar"><div class="brand"><span class="brand-code">APH</span><div><strong>AI Project Harness</strong><small>项目持续，Agent 轮换</small></div></div><div class="project-context"><span>${escapeHtml(project.name)}</span><b>HEAD R${project.revision}</b></div><div class="top-actions"><button class="action action--quiet" data-action="guide-open">小助手</button><button class="action action--quiet action--refresh" data-action="refresh">刷新状态</button>${!project.codexProjectId ? `<button class="action action--quiet" data-action="connect-codex" data-guide-target="project-connect-codex">连接 Codex</button>` : `<button class="action action--quiet action--open-codex" data-action="open-codex-project">打开最近对话</button>`}<button class="action action--quiet action--new-conversation" data-action="new-conversation">新对话</button><button class="action action--quiet action--details" data-action="open-details">项目详情</button><button class="action action--quiet action--cto" data-action="open-cto">进入 CTO</button>${project.status === "archived" ? `<button class="action action--accept" data-action="restore-project" data-guide-target="project-restore">恢复项目</button>` : `<button class="action action--accept" data-action="new-task" data-guide-target="task-create">新建任务</button>`}</div></header>
-    <aside class="project-rail"><div class="rail-title"><span>项目 <small>${activeProjectCount} 个活动</small></span><b>${snapshot.state.projects.length}</b></div><label class="rail-search"><span>筛选项目</span><input id="project-search" type="search" placeholder="名称 / 状态" autocomplete="off" /></label><nav aria-label="项目列表">${renderProjectList(snapshot)}</nav><button class="add-project" data-action="add-project" aria-label="添加项目"><span aria-hidden="true">＋</span>添加项目</button></aside>
+  return `<div class="app-shell">
+    <header class="topbar"><div class="brand"><span class="brand-code">APH</span><div><strong>AI Project Harness</strong><small>项目持续，Agent 轮换</small></div></div><div class="project-context"><span>${escapeHtml(project.name)}</span><b>HEAD R${project.revision}</b></div><div class="top-actions">${!project.codexProjectId ? `<button class="action action--quiet" data-action="connect-codex">连接 Codex</button>` : ""}<button class="action action--quiet action--project-tools" data-action="project-tools">项目工具</button><button class="action action--quiet action--details" data-action="open-details">项目详情</button><button class="action action--quiet action--cto" data-action="open-cto">进入 CTO</button>${project.status === "archived" ? `<button class="action action--accept" data-action="restore-project">恢复项目</button>` : `<button class="action action--accept" data-action="new-task">新建任务</button>`}</div></header>
+    <aside class="project-rail"><div class="rail-title"><span>项目 <small>${activeProjectCount} 个活动</small></span><b>${activeProjectCount}</b></div><label class="rail-search"><span>筛选项目</span><input id="project-search" type="search" placeholder="名称 / 状态" autocomplete="off" /></label><nav aria-label="项目列表">${renderProjectList(snapshot)}</nav><button class="add-project" data-action="add-project" aria-label="添加项目"><span aria-hidden="true">＋</span>添加项目</button></aside>
     <main class="work-surface">
       <div class="content-column">
         ${recoveryBanner}
@@ -377,26 +432,29 @@ export function renderApp(snapshot: Snapshot, detailsOpen = false): string {
     </main>
     ${renderDetailsDrawer(snapshot, project, git, github, detailsOpen)}
     ${renderDialogs(snapshot)}
-    ${guide}
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
-  </div>`, locale, protectedValues);
+  </div>`;
 }
 
 function renderDialogs(snapshot?: Snapshot): string {
-  const dialogProject = snapshot?.state.projects.find((item) => item.id === snapshot.state.selectedProjectId);
+  const dialogProject = snapshot?.state.projects.find((item) => item.id === snapshot.state.selectedProjectId && item.status !== "archived")
+    || snapshot?.state.projects.find((item) => item.status !== "archived");
+  const archivedCount = snapshot?.state.projects.filter((item) => item.status === "archived").length || 0;
   const dialogSections = (dialogProject?.sections || []).filter((section) => section.kind !== "main" && !["closed", "archived"].includes(section.status));
   const codexAvailable = Boolean(snapshot?.agents?.codex?.installed);
   const codexConnectionLabel = codexAvailable ? "已找到 Codex" : "没有检测到 Codex";
   const codexConnectionDetail = codexAvailable
-    ? "你可以选择一个现有的 Codex 项目。确认导入前，不会启动任何任务。"
-    : "没有检测到 Codex，但你仍然可以先新建项目";
+    ? "点击后会用关键词搜索活跃/归档对话，再由 Codex 自动整理并等待审核。"
+    : "没有检测到 Codex；关键词整理和手动整理需要先让 Codex 可用。";
   const dependencyOptions = renderDependencyOptions(dialogProject);
   const sectionOptions = renderSectionOptions(dialogSections);
-  return `<dialog id="project-dialog" class="acid-dialog acid-dialog--project"><form id="project-form" data-mode=""><div class="dialog-title"><span>添加项目</span><button type="button" data-close aria-label="关闭">×</button></div><div class="project-onboarding-copy"><span class="eyebrow">从哪里开始？</span><h2>新建一个，或者从 Codex 带过来。</h2><p>新建项目不会自动连接 Codex。导入时也只会读取你选中的项目，不会翻看其他对话。</p></div><input type="hidden" name="entryMode" value="" />
-    <div class="project-mode-choice" role="group" aria-label="项目来源"><button type="button" class="project-mode-card" data-action="select-project-mode" data-mode="blank" data-guide-target="project-create-blank" aria-label="新建项目" aria-pressed="false"><span class="project-mode-card__index">01</span><strong>新建项目</strong><small>先保存项目名称和目标，之后再选择文件夹或连接 Codex。</small></button><button type="button" class="project-mode-card" data-action="select-project-mode" data-mode="import" data-guide-target="project-import-registered" aria-label="从 Codex 导入" aria-pressed="false"><span class="project-mode-card__index">02</span><strong>从 Codex 导入</strong><small>从你已经在 Codex 中建立的项目导入现有信息。</small></button></div>
-    <section class="project-mode-panel" data-project-mode-panel="blank" hidden><span class="eyebrow">新建项目</span><label>项目名称（必填）<input name="blankName" required maxlength="120" autocomplete="off" placeholder="例如：我的第一个项目" /></label><label>项目文件夹（可选）<input name="blankPath" maxlength="500" autocomplete="off" placeholder="现在不选也没关系" /></label><label>你想完成什么？（可选）<textarea name="blankGoal" rows="3" placeholder="例如：整理需求并完成第一个可验收任务"></textarea></label><div class="field-pair"><label>技术栈（可选）<textarea name="blankTechStack" rows="3" placeholder="每行一项"></textarea></label><label>需要注意的事项（可选）<textarea name="blankConstraints" rows="3" placeholder="每行一项"></textarea></label></div><p class="dialog-help">这里只会在 Harness 中保存项目资料，不会连接 Codex，也不会读取代码或历史记录。</p></section>
-    <section class="project-mode-panel" data-project-mode-panel="import" hidden><span class="eyebrow">从 Codex 导入</span><label>Codex 项目名称<input name="importName" maxlength="120" autocomplete="off" placeholder="例如：portfolio" /></label><p class="dialog-help">如果找到多个相似项目，我们会让你选择，不会自动替你决定。</p><div class="agent-connection" aria-label="${codexAvailable ? "已找到 Codex" : "没有检测到 Codex"}"><span class="agent-light${codexAvailable ? " agent-light--on" : ""}"></span><div><strong>${codexConnectionLabel}</strong><small>${codexConnectionDetail}</small></div></div></section>
-    <div id="project-entry-hint" class="project-entry-hint" role="status">选择一种方式后继续。</div><div id="project-onboarding-status" class="project-onboarding-status" hidden></div><div class="dialog-actions"><button type="button" data-close class="action action--quiet">取消</button><button type="submit" class="action action--accept" disabled>选择方式后继续</button></div></form></dialog>
+  const projectToolsDialog = dialogProject ? `<dialog id="project-tools-dialog" class="acid-dialog acid-dialog--tools"><div class="dialog-title"><span>项目工具</span><button type="button" data-close aria-label="关闭">×</button></div><p class="dialog-help">常用的项目级操作集中在这里。项目归档和移出都不会删除 Git、项目目录或 Codex 对话。</p><div class="project-tools-grid"><button class="action action--quiet" data-action="open-archived-projects">已归档项目（${archivedCount}）</button><button class="action action--quiet" data-action="open-project-path">打开项目目录</button><button class="action action--quiet" data-action="open-ledger">打开动态白皮书</button><button class="action action--quiet" data-action="import-archive">导入会话归档</button><button class="action action--quiet" data-action="open-archive">查看归档目录</button><button class="action action--quiet" data-action="export-project">导出项目包</button><button class="action action--quiet" data-action="import-project">导入项目包</button><button class="action action--quiet" data-action="apply-template">套用项目模板</button>${dialogProject.source?.kind === "blank" || dialogProject.codexProjectId ? `<button class="action action--quiet" data-action="sync-codex">${dialogProject.codexSyncError ? "重试连接 Codex" : "同步 Codex Project"}</button>` : ""}<button class="action action--quiet" data-action="archive-project">归档项目</button>${dialogProject.status === "active" ? `<button class="action action--quiet" data-action="pause-project">暂停项目</button>` : dialogProject.status === "paused" ? `<button class="action action--accept" data-action="resume-project">恢复运行</button>` : ""}<button class="action action--quiet action--danger" data-action="remove-project">移出项目（可恢复）</button></div><small class="drawer-note">移出会把 Harness 项目状态保存到数据盘的 _eliminated/projects/，不删除实际文件。</small></dialog>` : "";
+  return `<dialog id="project-dialog" class="acid-dialog acid-dialog--project"><form id="project-form" data-mode=""><div class="dialog-title"><span>添加项目</span><button type="button" data-close aria-label="关闭">×</button></div><div class="project-onboarding-copy"><span class="eyebrow">从哪里开始？</span><h2>新建一个，或者从 Codex 整理。</h2><p>空白项目会依次请求 Review、CTO 标准对话；已有项目先完成初始化回写，再请求这两个标准入口。</p></div><input type="hidden" name="entryMode" value="" />
+     <div class="project-mode-choice" role="group" aria-label="项目来源"><button type="button" class="project-mode-card" data-action="select-project-mode" data-mode="blank" aria-label="新建项目" aria-pressed="false"><span class="project-mode-card__index">01</span><strong>新建空白项目</strong><small>通过 Desktop 原生深链注册 Project，再在 Desktop 中继续。</small></button><button type="button" class="project-mode-card" data-action="select-project-mode" data-mode="import" aria-label="关键词整理" aria-pressed="false"><span class="project-mode-card__index">02</span><strong>关键词整理</strong><small>给 Codex 一个项目关键词，让它自动搜索并整理相关信息。</small></button><button type="button" class="project-mode-card" data-action="select-project-mode" data-mode="threads" aria-label="手动选择 Codex 对话" aria-pressed="false"><span class="project-mode-card__index">03</span><strong>手动选对话</strong><small>固定你勾选的对话范围，让 Codex 只整理这些来源。</small></button></div>
+     <section class="project-mode-panel" data-project-mode-panel="blank" hidden><span class="eyebrow">新建空白项目</span><label>项目名称（必填）<input name="blankName" required maxlength="120" autocomplete="off" placeholder="例如：我的第一个项目" /></label><label>项目文件夹（可选）<input name="blankPath" maxlength="500" autocomplete="off" placeholder="现在不选也没关系" /></label><label>你想完成什么？（可选）<textarea name="blankGoal" rows="3" placeholder="例如：整理需求并完成第一个可验收任务"></textarea></label><div class="field-pair"><label>技术栈（可选）<textarea name="blankTechStack" rows="3" placeholder="每行一项"></textarea></label><label>需要注意的事项（可选）<textarea name="blankConstraints" rows="3" placeholder="每行一项"></textarea></label></div><p class="dialog-help">创建后会依次打开 Review、CTO 的 Desktop 原生待发送入口，不启动历史整理任务。</p></section>
+     <section class="project-mode-panel" data-project-mode-panel="import" hidden><span class="eyebrow">关键词整理</span><label>项目关键词或简称<input name="importName" maxlength="120" autocomplete="off" placeholder="例如：portfolio" /></label><p class="dialog-help">Codex 会根据关键词、项目关系和可验证历史自动整理；不需要你逐个勾选对话。</p><div class="agent-connection" aria-label="${codexAvailable ? "已找到 Codex" : "没有检测到 Codex"}"><span class="agent-light${codexAvailable ? " agent-light--on" : ""}"></span><div><strong>${codexConnectionLabel}</strong><small>${codexConnectionDetail}</small></div></div></section>
+    <section class="project-mode-panel project-mode-panel--threads" data-project-mode-panel="threads" hidden><span class="eyebrow">手动选择对话</span><label>新项目名称（必填）<input name="threadsName" maxlength="120" autocomplete="off" placeholder="例如：整理多个历史对话" /></label><label>你想完成什么？（可选）<textarea name="threadsGoal" rows="2" placeholder="例如：合并这些对话中的任务、决策和进度"></textarea></label><div class="conversation-picker-heading"><div><strong>未归档的 Codex 本地对话</strong><small>直接勾选多个对话，不用按住 Ctrl。只读取勾选项。</small></div><span id="conversation-selection-count">已选 0 个</span><button type="button" class="text-action" data-action="reload-conversation-index">重新读取</button></div><div id="codex-conversation-picker" class="conversation-picker" role="group" aria-label="选择要载入的 Codex 对话"><div class="conversation-picker-state"><strong>选择这个方式后读取对话索引</strong><small>不会打开对话正文。</small></div></div></section>
+     <div id="project-entry-hint" class="project-entry-hint" role="status">选择一种方式后继续。</div><div id="project-onboarding-status" class="project-onboarding-status" hidden></div><div class="dialog-actions"><button type="button" data-close class="action action--quiet">取消</button><button type="submit" class="action action--accept" disabled>选择方式后继续</button></div></form></dialog><dialog id="project-progress-dialog" class="acid-dialog acid-dialog--progress"><div class="dialog-title"><span>正在创建项目</span><button type="button" data-close aria-label="关闭">×</button></div><div id="project-progress-status" class="project-onboarding-status" role="status"></div><p class="dialog-help">关闭此窗口不会停止后台创建；项目卡片会继续显示真实状态。</p></dialog>
     <dialog id="task-dialog" class="acid-dialog"><form id="task-form"><div class="dialog-title"><span>新建任务</span><button type="button" data-close aria-label="关闭">×</button></div><label>任务名称<input name="title" required maxlength="120" /></label><label>工作流<input name="workstream" value="general" maxlength="60" /></label><label>验收条件<textarea name="criteria" rows="4" placeholder="每行一条验收条件"></textarea></label><div class="field-pair"><label>执行 Agent<select name="agent"><option value="codex">Codex</option><option value="claude">Claude Code</option><option value="hermes">Hermes</option></select></label><label>上下文方式<select name="sessionPolicy"><option value="auto">自动选择</option><option value="warm">复用工作流</option><option value="disposable">一次性会话</option></select></label></div><div class="field-pair"><label>优先级<select name="priority"><option value="normal">普通</option><option value="high">高</option><option value="urgent">紧急</option><option value="low">低</option></select></label><label>指定 Section（可选）<select name="sectionId"><option value="">开始时自动按工作流选择</option>${sectionOptions}</select></label></div><label>前置任务（可选）<select name="dependsOn" multiple size="4" aria-describedby="task-dependencies-help">${dependencyOptions}</select><small id="task-dependencies-help" class="dialog-help">可选；按住 Ctrl/⌘ 可多选，任务会等前置任务验收后再启动。</small></label><label>审核方式<select name="reviewMode"><option value="user">用户确认后推进（推荐）</option><option value="auto">Review Agent 自动推进</option></select></label><div class="dialog-actions"><button type="button" data-close class="action action--quiet">取消</button><button type="submit" class="action action--accept">创建任务</button></div></form></dialog>
     <dialog id="section-assignment-dialog" class="acid-dialog"><form id="section-assignment-form"><div class="dialog-title"><span>改派任务 Section</span><button type="button" data-close aria-label="关闭">×</button></div><input type="hidden" name="taskId"/><p class="dialog-help">任务改派只更新后续调度归属，不会重跑已完成的任务；运行中的任务请先停止。</p><p>任务：<strong id="section-assignment-task-title">--</strong></p><label>目标 Section<select name="sectionId" required>${sectionOptions || `<option value="" disabled>暂无可用 Section</option>`}</select></label><div class="dialog-actions"><button type="button" data-close class="action action--quiet">取消</button><button type="submit" class="action action--accept">保存改派</button></div></form></dialog>
     <dialog id="section-dialog" class="acid-dialog"><form id="section-form"><div class="dialog-title"><span>新建工作 Section</span><button type="button" data-close aria-label="关闭">×</button></div><p class="dialog-help">主控 Section 只负责调配；这里创建一个可复用或一次性执行区。</p><label>Section 名称<input name="name" required maxlength="80" placeholder="例如：前端迭代" /></label><div class="field-pair"><label>类型<select name="kind"><option value="reusable">可复用 Section</option><option value="one-shot">一次性 Section</option></select></label><label>默认 Agent<select name="agent"><option value="codex">Codex</option><option value="claude">Claude Code</option><option value="hermes">Hermes</option></select></label></div><label>审核方式<select name="approvalMode"><option value="user">用户确认后推进（推荐）</option><option value="auto">Review Agent 自动推进</option></select></label><div class="dialog-actions"><button type="button" data-close class="action action--quiet">取消</button><button type="submit" class="action action--accept">创建 Section</button></div></form></dialog>
@@ -404,7 +462,7 @@ function renderDialogs(snapshot?: Snapshot): string {
     <dialog id="remote-dialog" class="acid-dialog"><form id="remote-form"><div class="dialog-title"><span>连接 GitHub 远端</span><button type="button" data-close aria-label="关闭">×</button></div><p class="dialog-help">只保存 Git 的 origin 地址；不会登录或上传代码。提交后可用本机 gh 读取 PR/Issue。</p><label>远端地址<input name="remoteUrl" required maxlength="500" placeholder="https://github.com/owner/repo.git" /></label><label>远端名称<input name="remoteName" value="origin" maxlength="64" /></label><div class="dialog-actions"><button type="button" data-close class="action action--quiet">取消</button><button type="submit" class="action action--accept">保存远端</button></div></form></dialog>
     <dialog id="template-dialog" class="acid-dialog"><form id="template-form"><div class="dialog-title"><span>套用项目模板</span><button type="button" data-close aria-label="关闭">×</button></div><p class="dialog-help">模板只填充目标、技术栈、约束和不重复的起始任务；已有内容不会删除。</p><label>模板<select name="templateId"><option value="blank">空白项目</option><option value="web">Web 应用</option><option value="library">库 / SDK</option><option value="automation">自动化工具</option><option value="research">研究 / 原型</option></select></label><div class="dialog-actions"><button type="button" data-close class="action action--quiet">取消</button><button type="submit" class="action action--accept">应用模板</button></div></form></dialog>
     <dialog id="decision-dialog" class="acid-dialog"><form id="decision-form"><div class="dialog-title"><span>记录工程决策</span><button type="button" data-close aria-label="关闭">×</button></div><label>决策内容<textarea name="title" rows="3" required maxlength="1200" placeholder="例如：保持本地优先，不上传 transcript"></textarea></label><label>理由（可选）<textarea name="rationale" rows="3" maxlength="2000"></textarea></label><div class="dialog-actions"><button type="button" data-close class="action action--quiet">取消</button><button type="submit" class="action action--accept">保存决策</button></div></form></dialog>
-    <dialog id="conversation-dialog" class="acid-dialog"><form id="conversation-form"><div class="dialog-title"><span>新建项目对话</span><button type="button" data-close aria-label="关闭">×</button></div><p class="dialog-help">Harness 会在当前项目下创建一个独立对话，不会继续堆积旧的 resume 历史。</p><label>对话主题<input name="title" required maxlength="160" placeholder="例如：讨论下一阶段架构" /></label><div class="field-pair"><label>Agent<select name="agent"><option value="codex">Codex Project 对话</option><option value="claude">Claude Code（用户主动）</option><option value="hermes">Hermes（用户主动）</option></select></label><label>会话类型<select name="type"><option value="warm">可继续的温会话</option><option value="disposable">一次性讨论</option></select></label></div><div class="dialog-actions"><button type="button" data-close class="action action--quiet">取消</button><button type="submit" class="action action--accept">创建并打开</button></div></form></dialog>
+    ${projectToolsDialog}${snapshot ? renderArchivedProjectsDialog(snapshot) : ""}
     <dialog id="objective-dialog" class="acid-dialog"><form id="objective-form"><div class="dialog-title"><span>切换 Objective</span><button type="button" data-close aria-label="关闭">×</button></div><p class="dialog-help">旧 Objective 会保留在历史中，并自动变为暂停或 superseded；项目同时只保留一个 active Objective。</p><label>新 Objective<input name="title" required maxlength="1200" placeholder="例如：完成跨 Agent 回写验收" /></label><label class="checkbox-line"><input type="checkbox" name="supersede" /> 将当前 Objective 标记为 superseded</label><div class="dialog-actions"><button type="button" data-close class="action action--quiet">取消</button><button type="submit" class="action action--accept">切换</button></div></form></dialog>
     <dialog id="result-dialog" class="acid-dialog acid-dialog--wide"><form id="result-form"><div class="dialog-title"><span>提交 Agent 结果</span><button type="button" data-close aria-label="关闭">×</button></div><input type="hidden" name="taskId"/><label>结构化结果 JSON<textarea name="result" rows="16" spellcheck="false"></textarea></label><p class="dialog-help">正常情况下结果由 Agent 自动回写并交给项目 Review Agent；这里保留人工补交入口，便于恢复异常运行。</p><div class="dialog-actions"><button type="button" data-close class="action action--quiet">取消</button><button type="submit" class="action action--accept">送交审核</button></div></form></dialog>`;
 }

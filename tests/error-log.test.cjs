@@ -79,3 +79,20 @@ test("error log never crashes while normalizing a circular rejection value", () 
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("diagnostic warnings are stored with warning severity instead of looking like failures", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "aph-error-log-"));
+  const filePath = path.join(root, "harness-errors.jsonl");
+  try {
+    const errorLog = createErrorLog({ filePath });
+    const record = errorLog.capture(new Error("observer continues"), {
+      operation: "codex-visible-thread-monitor",
+      stage: "transient-terminal",
+      severity: "warning",
+    });
+    assert.equal(record.severity, "warning");
+    assert.equal(JSON.parse(fs.readFileSync(filePath, "utf8").trim()).severity, "warning");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

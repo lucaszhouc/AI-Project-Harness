@@ -44,13 +44,13 @@ test("onboarding IPC forwards real progress and logs the exact failing stage", a
 
 test("onboarding keeps the original failure visible when the log disk is unavailable", async () => {
   const handler = createOnboardingIpcHandler({
-    onboardProject: async () => { throw new Error("Codex app-server exited (1)"); },
+    onboardProject: async () => { throw new Error("DESKTOP_NATIVE_UNAVAILABLE"); },
     errorLog: { capture: () => { throw new Error("disk full"); } },
   });
 
   await assert.rejects(
     handler({ sender: { send() {}, isDestroyed: () => false } }, "Local Chat"),
-    /Codex app-server exited \(1\)/,
+    /DESKTOP_NATIVE_UNAVAILABLE/,
   );
 });
 
@@ -67,7 +67,7 @@ test("partial desktop-open failure is logged and returned as a persistent warnin
     const handler = createOnboardingIpcHandler({
       onboardProject: async () => ({
         desktopOpened: false,
-        desktopError: "codex app exited (1)",
+        desktopError: "DESKTOP_NATIVE_UNAVAILABLE",
         matchedProjectName: "iva-local-chat",
       }),
       errorLog,
@@ -86,17 +86,17 @@ test("partial desktop-open failure is logged and returned as a persistent warnin
   }
 });
 
-test("official Project creation returns a cold-restart notice without fabricating an error", async () => {
+test("official Project creation returns a live-sidebar notice without fabricating an error", async () => {
   const handler = createOnboardingIpcHandler({
     onboardProject: async () => ({
       desktopOpened: true,
       desktopProjectRestartRequired: true,
-      desktopProjectWarning: "连接已经完成。请彻底退出 Codex Desktop 后重新打开，确认项目是否出现在侧栏。",
+      desktopProjectWarning: "连接已经完成。请在现有 Codex Desktop 窗口刷新或手动核对侧栏。",
     }),
     errorLog: { capture: () => { throw new Error("must not log an informational notice"); } },
   });
   const result = await handler({ sender: { send() {}, isDestroyed: () => false } }, "AI Harness");
   assert.equal(result.desktopProjectRestartRequired, true);
-  assert.equal(result.desktopProjectWarning.includes("彻底退出"), true);
+  assert.equal(result.desktopProjectWarning.includes("现有 Codex Desktop 窗口"), true);
   assert.equal(result.desktopWarning, undefined);
 });

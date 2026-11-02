@@ -11,56 +11,113 @@ const { exportProjectBundle, importProjectBundle } = require("./project-bundle.c
 const { listTemplates, applyProjectTemplate } = require("./project-templates.cjs");
 const { applyDecisionProposal, buildProjectContext } = require("./harness-protocol.cjs");
 const { inspectProjectProfile } = require("./project-profile.cjs");
-const { resolveAppServerCwd, resolveBundledSkillPath, resolveBundledProtocolPath, resolveDataRoot, resolveJournalPath, resolveHarnessCliPath, resolveHarnessMcpPath } = require("./runtime-paths.cjs");
+const { resolveHarnessTrustedRoot, createHarnessProtocolPathProvider, resolveBundledProtocolPath, resolveDataRoot, resolveJournalPath } = require("./runtime-paths.cjs");
 const { createProjectOnboarding } = require("./project-onboarding.cjs");
-const { resolveCodexProjectByName, selectCodexProjectRoot } = require("./project-discovery.cjs");
-const { applyHarnessImport, selectCodexProjectThreads } = require("./codex-import.cjs");
+const { applyHarnessImport } = require("./codex-import.cjs");
 const { createErrorLog } = require("./error-log.cjs");
 const { createOnboardingIpcHandler } = require("./onboarding-ipc.cjs");
 const { createDiagnostics, installProcessErrorLogging } = require("./diagnostics.cjs");
 const { detectCommand } = require("./command-runtime.cjs");
-const { openCodexDesktop, launchHarnessTask, launchHarnessImport, createCodexControlThread, ensureCodexProject, inspectCodexThread, listRecentCodexThreads, listAllCodexThreads, listCodexProjects, terminateCodexProcessTree, registerCodexDesktopProject } = require("./codex-adapter.cjs");
-const { createAgentRunMonitor } = require("./agent-run-monitor.cjs");
+const { openCodexDesktop, registerCodexDesktopProject, desktopNativeBlocked, onboardingPrompt, taskPrompt, harnessProtocolReference } = require("./codex-adapter.cjs");
 const { detectAgentCapabilities } = require("./agent-capabilities.cjs");
 const { platformCapabilities } = require("./platform.cjs");
 const { projectHealth } = require("./health.cjs");
 const { readSqliteSummary } = require("./sqlite-index.cjs");
 const { createTaskOpenHandler, createProjectOpenHandler } = require("./task-open.cjs");
-const { ensureCodexProjectFolder, assignCodexThreadToProjectFolder, legacyStateSyncEnabled, defaultStatePath: defaultCodexGlobalStatePath } = require("./codex-projects.cjs");
 const { createManagedWorkspace } = require("./managed-workspace.cjs");
-const { GuideStateStore } = require("./guide-state.cjs");
-const { createProbeRunner } = require("./guide-probes.cjs");
-const { createGuideActionExecutor } = require("./guide-actions.cjs");
-const { nextGuideRecommendation, reconcileGuideState } = require("./guide-orchestrator.cjs");
+const { createOperationExecutor } = require("./operation-ledger.cjs");
+const { createSnapshotCoordinator } = require("./snapshot-coordinator.cjs");
+const { createMcpControlServer } = require("./mcp-control.cjs");
+const { createStandardControlOpener, needsProjectInitialization, controlPrompt } = require("./control-conversations.cjs");
 
 const RUNTIME_REFRESH_INTERVAL_MS = 5000;
+const TASK_LEASE_MS = 24 * 60 * 60 * 1000;
 let store;
-let guideStore;
-let guideProbeRunner;
 let mainWindow;
 let windowPinned = false;
+let harnessTrustedRoot;
+const getHarnessProtocolPaths = createHarnessProtocolPathProvider(() => ({
+  isPackaged: app.isPackaged, resourcesPath: process.resourcesPath, appPath: app.getAppPath(),
+}));
 let windowPrefsPath;
 let errorLog;
 let diagnostics;
 const activeCodexClients = new Map();
-const controlThreadInflight = new Map();
+const observingCodexThreads = new Map();
 const codexRegistrationInflight = new Map();
+let standardControlOpener;
+let onboardProject;
 let runtimeRefreshTimer;
 let runtimeRefreshInFlight = false;
 let folderReconcileInFlight = false;
 const githubCache = new Map();
+const gitCache = new Map();
+const GIT_CACHE_MS = 2000;
+let folderReconcileBackoff;
 const GITHUB_CACHE_MS = 30000;
 let agentCapabilitiesCache;
 let agentCapabilitiesAt = 0;
 const AGENT_CACHE_MS = 30000;
-let snapshotQueue = Promise.resolve();
 let snapshotSequence = 0;
-// A dispatched task is persisted before its Codex app-server child returns a
+const mcpIpcHandlers = new Map();
+const mcpChannelMeta = new Map();
+let mcpControlServer;
+
+function mcpPermissionForChannel(channel) {
+  if (/^(?:harness:snapshot|codex:list|project:list|project:activity|archive:list|archive:verify|git:refresh|github:refresh)$/.test(channel)) return "read";
+  if (/^(?:task:accept|knowledge:accept|project:remove)$/.test(channel)) return "accept_requires_user_confirmation";
+  if (/^(?:project:create|project:import|task:dispatch|task:stop|project:archive|project:restore|project:sync|project:open|archive:open|window:toggle)/.test(channel)) return "prepare";
+  return "mutate_pending_review";
+}
+
+function mcpCapabilityForChannel(channel) {
+  if (["project:import-codex", "codex:list-conversations", "project:import-codex-conversations"].includes(channel)) {
+    return {
+      status: "blocked",
+      capability: "desktop-native-unavailable",
+      detail: "Harness 尚未接通 Desktop 原生项目和对话读取接口；该通道当前不可用。",
+    };
+  }
+  return { status: "available", capability: "desktop-native-or-local" };
+}
+
+function registerIpcHandle(channel, handler) {
+  mcpIpcHandlers.set(channel, handler);
+  mcpChannelMeta.set(channel, {
+    permission: mcpPermissionForChannel(channel),
+    description: `Harness IPC ${channel}`,
+    ...mcpCapabilityForChannel(channel),
+  });
+  ipcMain.handle(channel, handler);
+}
+// A dispatched task is persisted before its Codex Desktop 原生控制面 child returns a
 // thread/process id. Snapshots can run in that small hand-off window; keep
 // the launch alive long enough for attachExternalThread to bind the runtime.
 const LAUNCH_RECONCILE_GRACE_MS = 120_000;
 const hideAutomatedTestWindow = process.env.APH_TEST_WINDOW_HIDDEN === "1";
 const archiveTracePath = process.env.APH_ARCHIVE_TRACE_PATH;
+
+function getHarnessTrustedRoot() {
+  if (!harnessTrustedRoot) {
+    harnessTrustedRoot = resolveHarnessTrustedRoot({
+      isPackaged: app.isPackaged,
+      resourcesPath: process.resourcesPath,
+      appPath: app.getAppPath(),
+      executablePath: process.execPath,
+    });
+    fs.mkdirSync(path.join(harnessTrustedRoot, "harness-projects"), { recursive: true });
+  }
+  return harnessTrustedRoot;
+}
+
+function getCodexWritebackSkillPath() {
+  return getHarnessProtocolPaths().writebackSkillPath;
+}
+
+function getProtocolPromptPaths() {
+  const paths = getHarnessProtocolPaths();
+  return { ...paths, skillPath: paths.taskSkillPath, dataRoot: path.dirname(store.filePath) };
+}
 
 function traceRunArchive(stage, detail = {}) {
   if (!archiveTracePath) return;
@@ -72,9 +129,27 @@ function traceRunArchive(stage, detail = {}) {
   }
 }
 
-const codexFolderStatePath = process.env.APH_CODEX_GLOBAL_STATE
-  || (process.env.APH_USER_DATA ? path.join(process.env.APH_USER_DATA, ".codex-global-state.json") : defaultCodexGlobalStatePath());
-const allowLegacyCodexStateSync = legacyStateSyncEnabled();
+// Harness owns two kinds of Codex connections: active Desktop 原生控制面 clients that
+// own a turn, and read-only observers attached to a user-owned Desktop
+// thread.  Both are live runtime evidence.  Keeping the lookup here prevents
+// recovery, task controls, and UI open handlers from silently disagreeing
+// about whether a thread is still being monitored.
+function runtimeForThread(threadId) {
+  const key = String(threadId || "").trim();
+  if (!key) return undefined;
+  return activeCodexClients.get(key) || observingCodexThreads.get(key);
+}
+
+function hasRuntimeForThread(threadId) {
+  return Boolean(runtimeForThread(threadId));
+}
+
+function removeRuntimeForThread(threadId, expectedRuntime) {
+  const key = String(threadId || "").trim();
+  if (!key) return;
+  if (!expectedRuntime || activeCodexClients.get(key) === expectedRuntime) activeCodexClients.delete(key);
+  if (!expectedRuntime || observingCodexThreads.get(key) === expectedRuntime) observingCodexThreads.delete(key);
+}
 
 if (process.env.APH_USER_DATA) app.setPath("userData", process.env.APH_USER_DATA);
 
@@ -93,17 +168,6 @@ if (!singleInstanceLock) {
   });
 }
 
-function isProcessAlive(processId) {
-  if (!Number.isFinite(Number(processId)) || Number(processId) <= 0) return true;
-  try {
-    process.kill(Number(processId), 0);
-    return true;
-  } catch (error) {
-    // EPERM means the process exists but is not inspectable from this user.
-    return error?.code === "EPERM";
-  }
-}
-
 function ensureProjectDirectory(projectPath) {
   const resolved = path.resolve(String(projectPath || "").trim());
   if (!resolved || resolved === path.parse(resolved).root) throw new Error("项目目录不能是磁盘根目录");
@@ -115,6 +179,31 @@ function ensureProjectDirectory(projectPath) {
   return resolved;
 }
 
+function persistRemovedProject(project, reason = "用户从 Harness 移出") {
+  const root = path.join(store.contextRoot || path.dirname(store.filePath), "_eliminated", "projects");
+  fs.mkdirSync(root, { recursive: true });
+  const removedAt = new Date().toISOString();
+  const safeId = String(project.id || "project").replace(/[^a-zA-Z0-9._-]+/g, "-").slice(0, 120) || "project";
+  const target = path.join(root, `${safeId}-${removedAt.replace(/[:.]/g, "-")}.json`);
+  const temporary = `${target}.tmp-${process.pid}-${Date.now()}`;
+  const payload = {
+    version: 1,
+    type: "ai-project-harness-project",
+    exportedAt: removedAt,
+    project,
+    archiveRefs: [],
+    removal: { removedAt, reason: String(reason || "用户从 Harness 移出").slice(0, 500) },
+  };
+  try {
+    fs.writeFileSync(temporary, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+    fs.renameSync(temporary, target);
+    return target;
+  } catch (error) {
+    try { fs.rmSync(temporary, { force: true }); } catch {}
+    throw new Error(`项目移出备份写入失败：${error?.message || error}`);
+  }
+}
+
 function reconcileDetachedRuns() {
   if (!store) return;
   let changed = false;
@@ -122,38 +211,98 @@ function reconcileDetachedRuns() {
     for (const task of project.tasks) {
       const run = task.run;
       if (!run || !(run.status === "starting" || run.status === "running" || (!run.status && task.status === "in_progress"))) continue;
-      if (run.status === "starting" && !run.externalThreadId && !run.processId) {
-        const startedAt = Date.parse(String(run.startedAt || ""));
-        if (!Number.isFinite(startedAt) || Date.now() - startedAt < LAUNCH_RECONCILE_GRACE_MS) continue;
-      }
-      if (run.externalThreadId && activeCodexClients.has(run.externalThreadId)) continue;
-      if (run.processId && isProcessAlive(run.processId)) continue;
+      // A visible Desktop-owned thread is monitored through
+      // observingCodexThreads, while Harness-owned turns use
+      // activeCodexClients.  Treat either runtime as attached.  Also keep a
+      // short recovery grace for a just-persisted binding: attachExternalThread
+      // and runtime registration are separate operations, so a snapshot may
+      // legitimately arrive between them.
+      if (run.externalThreadId && hasRuntimeForThread(run.externalThreadId)) continue;
+      const detachedSince = Date.parse(String(run.lastEventAt || run.startedAt || ""));
+      if (Number.isFinite(detachedSince) && Date.now() - detachedSince < LAUNCH_RECONCILE_GRACE_MS) continue;
       // The app was restarted or the child exited before its final notification.
       // Mark it finished-but-unreconciled so the UI never lies that it is still running.
-      machine.markRunCompleted(store.state, project.id, task.id, "Agent 进程已退出，等待结构化结果回写");
+      traceRunArchive("reconcile:detached", {
+        projectId: project.id,
+        taskId: task.id,
+        runId: run.id,
+        threadId: run.externalThreadId,
+        activeRuntime: Boolean(run.externalThreadId && activeCodexClients.has(String(run.externalThreadId))),
+        observingRuntime: Boolean(run.externalThreadId && observingCodexThreads.has(String(run.externalThreadId))),
+      });
+      run.status = "disconnected";
+      run.phase = "connection_lost";
+      run.progress = undefined;
+      run.lastEvent = "没有持有该任务的执行连接，无法确认 Agent 是否结束；请在原生 Agent 检查。";
+      task.status = "awaiting_result";
       changed = true;
     }
   }
   if (changed) store.write();
 }
 
-async function buildSnapshotNow({ forceGithub = false } = {}) {
-  const externalStateReloaded = activeCodexClients.size === 0 && (store.reloadExternal?.() || false);
+function collectExpiredTaskLeaseCandidates(at = Date.now()) {
+  const candidates = [];
+  for (const project of store?.state?.projects || []) {
+    for (const task of project.tasks || []) {
+      if (!task.run || !["in_progress", "awaiting_result"].includes(task.status)) continue;
+      if (!["starting", "running"].includes(String(task.run.status || "").toLowerCase())) continue;
+      const status = String(task.run.status || "").toLowerCase();
+      const startedAt = Date.parse(String(task.run.leaseStartedAt || (status === "running" || (task.run.externalThreadId && (task.run.externalTurnId || task.run.processId)) ? task.run.startedAt : "")));
+      if (!Number.isFinite(startedAt) || at - startedAt < TASK_LEASE_MS) continue;
+      candidates.push({ projectId: project.id, taskId: task.id, threadId: task.run.externalThreadId });
+    }
+  }
+  return candidates;
+}
+
+function reconcileTaskLeases(reason = "任务超过 24 小时 lease") {
+  if (!store) return [];
+  const candidates = collectExpiredTaskLeaseCandidates();
+  if (!candidates.length) return [];
+  for (const candidate of candidates) {
+    const threadId = candidate.threadId;
+    const runtime = threadId ? runtimeForThread(threadId) : undefined;
+    if (!runtime) continue;
+    runtime.intentionalStop = true;
+    try { runtime.client.close(new Error(reason)); } catch {}
+    removeRuntimeForThread(threadId, runtime);
+  }
+  let expired = [];
+  store.update((state) => {
+    expired = machine.expireTaskLeases(state, Date.now(), TASK_LEASE_MS, reason);
+  });
+  return expired;
+}
+
+async function buildSnapshotNow({ forceGithub = false, forceGit = false } = {}) {
+  // Read-only Desktop observers also mutate durable Harness state through
+  // their monitor callbacks. Do not reload the file over those in-memory
+  // updates while an observer is live.
+  const externalStateReloaded = activeCodexClients.size === 0
+    && observingCodexThreads.size === 0
+    && (store.reloadExternal?.() || false);
   if (externalStateReloaded) {
-    // A CLI/MCP writer may have changed project metadata; its GitHub cache is
+    // Another Harness Desktop process may have changed project metadata; its GitHub cache is
     // still safe, but stale project paths should be checked again.
     githubCache.clear();
+    gitCache.clear();
   }
   reconcileDetachedRuns();
   const gitEntries = await Promise.all(
-    store.state.projects.map(async (project) => [project.id, project.path
-      ? await readGitStatus(project.path)
-      : {
+    store.state.projects.map(async (project) => {
+      const key = project.path ? path.resolve(project.path).toLowerCase() : "";
+      const cached = gitCache.get(project.id);
+      if (!forceGit && cached?.key === key && Date.now() - cached.at < GIT_CACHE_MS) return [project.id, cached.value];
+      const value = project.path ? await readGitStatus(project.path) : {
         available: false,
         error: "项目路径尚未设置",
         detail: "这是一个空白项目；绑定本地目录后才会读取 Git。",
         checkedAt: new Date().toISOString(),
-      }]),
+      };
+      gitCache.set(project.id, { key, at: Date.now(), value });
+      return [project.id, value];
+    }),
   );
   const changed = gitEntries.some(([projectId, git]) => {
     const project = store.state.projects.find((item) => item.id === projectId);
@@ -223,18 +372,6 @@ async function buildSnapshotNow({ forceGithub = false } = {}) {
     agentCapabilitiesAt = Date.now();
   }
   const agents = agentCapabilitiesCache;
-  const guideFacts = {
-    projects: store.state.projects,
-    selectedProjectId: store.state.selectedProjectId,
-    probes: guideStore?.state?.probes || {},
-    sequence: snapshotSequence + 1,
-  };
-  if (guideStore) {
-    const guideBefore = JSON.stringify(guideStore.state);
-    reconcileGuideState(guideStore.state, guideFacts);
-    if (guideBefore !== JSON.stringify(guideStore.state)) guideStore.write();
-  }
-  const guideRecommendation = nextGuideRecommendation(guideFacts);
   return {
     sequence: ++snapshotSequence,
     state: store.state,
@@ -244,24 +381,18 @@ async function buildSnapshotNow({ forceGithub = false } = {}) {
     overview,
     window: { alwaysOnTop: windowPinned },
     archives: Object.fromEntries(store.state.projects.map((project) => [project.id, listArchiveManifests(store.contextRoot || path.dirname(store.filePath), { projectId: project.id })])),
-    agents: { ...agents, codex: { ...agents.codex, bridge: agents.codex.installed ? "app-server" : "unavailable" } },
+    agents: { ...agents, codex: { ...agents.codex, bridge: agents.codex.native ? "desktop-native-protocol" : "unavailable" } },
     platform: process.platform,
     platformCapabilities: platformCapabilities(process.platform),
-    guide: guideStore?.state,
-    guideRecommendation,
-    storage: { root: path.dirname(store.filePath), statePath: store.filePath, journalPath: store.journalPath, archiveRoot: path.join(store.contextRoot || path.dirname(store.filePath), "archive"), sqlitePath: store.sqlitePath, sqlite: store.sqliteStatus || (store.sqlitePath ? readSqliteSummary(store.sqlitePath) : { available: false }), harnessCliPath: resolveHarnessCliPath({ isPackaged: app.isPackaged, resourcesPath: process.resourcesPath, appPath: app.getAppPath() }), harnessMcpPath: resolveHarnessMcpPath({ isPackaged: app.isPackaged, resourcesPath: process.resourcesPath, appPath: app.getAppPath() }) },
+    storage: { root: path.dirname(store.filePath), statePath: store.filePath, journalPath: store.journalPath, archiveRoot: path.join(store.contextRoot || path.dirname(store.filePath), "archive"), projectWorkspaceRoot: path.join(getHarnessTrustedRoot(), "harness-projects"), sqlitePath: store.sqlitePath, sqlite: store.sqliteStatus || (store.sqlitePath ? readSqliteSummary(store.sqlitePath) : { available: false }) },
   };
 }
 
-// IPC actions, the runtime heartbeat and external CLI reloads can all ask
+// IPC actions, the runtime heartbeat and external Desktop reloads can all ask
 // for a snapshot at once. Serialize the expensive projection so an older
 // asynchronous response cannot arrive after a newer state mutation and make
 // the renderer appear to roll back.
-function buildSnapshot(options = {}) {
-  const next = snapshotQueue.then(() => buildSnapshotNow(options));
-  snapshotQueue = next.catch(() => {});
-  return next;
-}
+const buildSnapshot = createSnapshotCoordinator(buildSnapshotNow);
 
 async function publishRuntimeSnapshot(event) {
   const snapshot = await buildSnapshot();
@@ -276,7 +407,8 @@ function startRuntimeRefresh() {
     runtimeRefreshInFlight = true;
     void (async () => {
       await reconcileCodexProjectFolders();
-      return publishRuntimeSnapshot({ type: "runtime.auto-refresh" });
+      const expired = reconcileTaskLeases();
+      return publishRuntimeSnapshot({ type: expired.length ? "task.lease-expired" : "runtime.auto-refresh", detail: expired.length ? `${expired.length} 个任务已超时` : undefined });
     })()
       .catch((error) => {
         try {
@@ -298,440 +430,120 @@ function stopRuntimeRefresh() {
   runtimeRefreshTimer = undefined;
 }
 
-async function ensureControlThread(project, session, codex, codexProjectId, { verifyExisting = false } = {}) {
-  if (!project || !session || !codex?.path) return session?.externalThreadId;
-  const key = `${project.id}:${session.role}`;
-  if (controlThreadInflight.has(key)) return controlThreadInflight.get(key);
-  const promise = (async () => {
-    let latest = machine.getProject(store.state, project.id);
-    let current = latest.sessions.find((item) => item.id === session.id || item.role === session.role);
-    if (current?.externalThreadId && verifyExisting) {
-      const health = await inspectCodexThread({
-        executable: codex.path,
-        cwd: latest.path,
-        threadId: current.externalThreadId,
-      });
-      const belongsToRequestedProject = !codexProjectId || current.externalProjectId === codexProjectId;
-      if (health.readable && belongsToRequestedProject) return current.externalThreadId;
-      // A shell-only thread (or a thread left in a previous official Project)
-      // cannot be repaired in place. Clear only the Harness pointer; the old
-      // Codex history remains untouched and a fresh seeded thread is created.
-      store.update((state) => {
-        const target = machine.getProject(state, project.id).sessions.find((item) => item.id === session.id || item.role === session.role);
-        if (target) {
-          target.externalThreadId = undefined;
-          target.externalProjectId = undefined;
-        }
-      });
-      latest = machine.getProject(store.state, project.id);
-      current = latest.sessions.find((item) => item.id === session.id || item.role === session.role);
-    }
-    if (current?.externalThreadId) return current.externalThreadId;
-    const control = await createCodexControlThread({
-      executable: codex.path,
-      projectPath: latest.path,
-      name: `${latest.name} · ${current?.title || session.role}`,
-      projectId: codexProjectId,
-      bootstrapText: [
-        "# AI Project Harness · 控制线程已就绪",
-        `PROJECT: ${latest.name}`,
-        `PROJECT_PATH: ${latest.path}`,
-        `ROLE: ${current?.role || session.role}`,
-        latest.ledger?.path ? `PROJECT_LEDGER: ${latest.ledger.path}` : "PROJECT_LEDGER: use npm run harness -- context",
-        "这是项目控制线程的有界入口。不要修改代码；等待 Harness 分派任务或用户明确指令。",
-      ].join("\n"),
-    });
-    store.update((state) => {
-      const targetProject = machine.getProject(state, project.id);
-      const target = targetProject.sessions.find((item) => item.id === session.id || item.role === session.role);
-      if (target) {
-        target.externalThreadId = control.threadId;
-        target.externalProjectId = codexProjectId;
-      }
-    });
-    if (codexProjectId && allowLegacyCodexStateSync) {
-      try {
-        assignCodexThreadToProjectFolder({ threadId: control.threadId, projectId: codexProjectId, statePath: codexFolderStatePath, enabled: allowLegacyCodexStateSync });
-      } catch {
-        // Codex folder grouping is best effort; the control thread is durable.
-      }
-    }
-    return control.threadId;
-  })().finally(() => controlThreadInflight.delete(key));
-  controlThreadInflight.set(key, promise);
-  return promise;
-}
-
-/** Ensure the two durable control sessions are members of one official
- * Codex Project. This helper is shared by every user-triggered Codex entry.
- * Control creation starts one bounded low-effort bootstrap turn so the
- * resulting thread has a real readable rollout and a visible sidebar preview
- * (startup itself never launches a model turn).
- */
-async function ensureDesktopProjectRegistration(project, codex, { force = false } = {}) {
-  if (!project?.path || !codex?.path) throw new Error("项目目录和 Codex 都是建立 Project 所必需的");
-  // Headless/release smoke explicitly disables external Desktop navigation.
-  // In that mode let the official app-server project/create path establish
-  // the Project instead of attempting a real codex:// protocol side effect.
-  if (process.env.APH_DISABLE_DESKTOP_DEEPLINK === "1") {
-    return { registered: false, skipped: true, capability: "desktop-deeplink-disabled" };
-  }
+/** Register a project through the Codex Desktop protocol. */
+async function ensureDesktopProjectRegistration(project, codex, { force = false, trustedRoot } = {}) {
+  if (!project?.path || !codex?.installed) throw new Error("项目目录和 Codex Desktop 都是建立 Project 所必需的");
+  // Desktop is the owner of its live Project registry. This call only emits
+  // the public registration deep link and leaves sidebar verification pending.
   const currentId = String(project.codexProjectId || "").trim();
-  if (!force && currentId && !currentId.startsWith("local-")) return { registered: false, projectId: currentId };
+  // An Desktop 原生控制面 Project id (or a local JSON entry) is not proof that the
+  // already-running Desktop renderer has loaded the Project into its sidebar.
+  // Keep this result explicitly unverified until a real Desktop control plane
+  // reports the live ProjectsManager entry.
+  if (!force && currentId && !currentId.startsWith("local-")) {
+    return {
+      registered: false,
+      desktopVerified: false,
+      projectId: currentId,
+      state: "desktop-restart-required",
+      detail: "官方 Project 已存在，但当前 Codex Desktop 侧栏没有实时可见性证据；Harness 不把它标记为已显示，请在现有 Desktop 窗口刷新或手动核对。",
+    };
+  }
   const key = project.id;
   if (codexRegistrationInflight.has(key)) return codexRegistrationInflight.get(key);
   const promise = (async () => {
     if (typeof registerCodexDesktopProject !== "function") throw new Error("当前 Codex 适配器缺少 Desktop Project 注册能力");
-    const result = await registerCodexDesktopProject({
+    const desktopBootstrap = await registerCodexDesktopProject({
       projectPath: project.path,
       openExternal: (uri) => shell.openExternal(uri),
+      route: "legacy",
     });
-    if (!result?.opened) throw new Error(result?.error || "Codex Desktop 未接受 Project 注册深链");
-    return result;
+    return {
+      registered: false,
+      desktopVerified: false,
+      state: "desktop-restart-required",
+       detail: "已通过 Codex Desktop 原生 Project 深链发起注册；侧栏可见性由 Desktop 自己确认。",
+      opened: Boolean(desktopBootstrap?.opened),
+      ...(desktopBootstrap?.error ? { openError: desktopBootstrap.error } : {}),
+      capability: "desktop-native-project-deep-link-only",
+      route: desktopBootstrap?.route,
+      uri: desktopBootstrap?.uri,
+    };
   })().finally(() => codexRegistrationInflight.delete(key));
   codexRegistrationInflight.set(key, promise);
   return promise;
 }
 
-function markCodexDesktopRegistered(projectId, officialProjectId) {
+function markCodexDesktopRegistered(projectId, officialProjectId, { desktopVerified = false, verificationMethod } = {}) {
   if (!store || !officialProjectId) return;
+  const project = machine.getProject(store.state, projectId);
+  // A local state-file lookup is deliberately not used as registration
+  // evidence. Only an injected/live Desktop ProjectsManager bridge may set
+  // desktopVerified; normal Desktop 原生控制面/deep-link flows remain pending.
+  const registered = desktopVerified === true;
   store.update((state) => {
     machine.setCodexProjectSync(state, projectId, {
       officialProjectId,
-      state: "desktop-registered",
-      detail: "Codex Desktop 已接受 Project 深链；控制对话已按官方 Project 建立。",
+      ...(registered ? { state: "desktop-registered", detail: "Desktop 原生项目已完成实时核验。" }
+        : { state: "desktop-restart-required", detail: `官方 Project 与控制对话已写入，但当前运行中的 Codex Desktop 尚未提供侧栏可见性证据；请在现有窗口刷新或手动核对。${verificationMethod ? `（核验方式：${String(verificationMethod).slice(0, 80)}）` : ""}` }),
     });
   });
 }
 
-async function ensureProjectControlPlane(project, codex, { verifyProject = true, openThreads = false, registerDesktop = true, forceRegistration = false } = {}) {
+async function ensureProjectControlPlane(project, codex, { verifyProject = true, openThreads = false, openRoles = ["review", "cto"], registerDesktop = true, forceRegistration = false, forceOpenThreads = false } = {}) {
   if (!project?.path) throw new Error("项目目录未绑定，无法建立 Codex 控制面");
-  if (!codex?.installed || !codex.path) throw new Error("未检测到 Codex，无法建立 Codex 控制面");
-  let waitForProjectMs = 0;
-  if (registerDesktop && (forceRegistration || !project.codexProjectId || String(project.codexProjectId).startsWith("local-"))) {
-    const registration = await ensureDesktopProjectRegistration(project, codex, { force: forceRegistration });
-    // The Desktop handler writes its app-server Project asynchronously after
-    // accepting the deep link. Give that write a bounded condition wait before
-    // falling back to our own project/create path.
-    if (registration?.opened) waitForProjectMs = 2500;
-  }
-  const officialProjectId = await ensureProjectFolder(project, codex, { verify: verifyProject, waitForProjectMs });
-  if (!officialProjectId) throw new Error("官方 Codex Project ID 缺失，无法建立控制面");
-  const latest = machine.getProject(store.state, project.id);
-  const controls = [];
-  for (const role of ["review", "cto"]) {
-    const session = latest.sessions.find((item) => item.role === role);
-    if (!session) throw new Error(`${role === "cto" ? "CTO" : "Review"} 控制 Session 未建立`);
-    const threadId = await ensureControlThread(
-      machine.getProject(store.state, project.id),
-      session,
-      codex,
-      officialProjectId,
-      { verifyExisting: true },
-    );
-    if (!threadId) throw new Error(`${role} 控制 thread 未建立`);
-    controls.push({ role, threadId });
-  }
-  const opened = [];
+  if (!codex?.installed) throw new Error("未检测到 Codex Desktop，无法建立原生控制面");
+  const registration = registerDesktop
+    ? await ensureDesktopProjectRegistration(project, codex, { force: forceRegistration, trustedRoot: getHarnessTrustedRoot() })
+    : undefined;
+  const opened = registration?.opened ? [{ role: "project", opened: true, capability: registration.capability, uri: registration.uri }] : [];
+  if (registration?.opened) await publishRuntimeSnapshot({ type: "codex.project.deep-link-opened", detail: registration.uri });
   if (openThreads) {
-    // Open Review first and CTO last so the user is left at the principal
-    // control conversation. Deep links are attempted by openCodexDesktop;
-    // this is user-triggered and therefore may legitimately focus Desktop.
-    for (const control of controls) {
-      const result = await openCodexDesktop(codex.path, latest.path, {
-        threadId: control.threadId,
-        openExternal: (uri) => shell.openExternal(uri),
-        preferProjectPath: false,
-      });
-      opened.push({ ...control, opened: Boolean(result.opened), error: result.error });
-      if (!result.opened) throw new Error(`${control.role} 控制 thread 深链打开失败：${result.error || "未知错误"}`);
+    if (needsProjectInitialization(machine.getProject(store.state, project.id))) {
+      await onboardProject(project.name, { projectId: project.id });
     }
+    const controls = await openStandardControlConversations(project.id, { roles: openRoles, force: forceOpenThreads });
+    opened.push(...controls.opened);
   }
   return {
-    codexProjectId: officialProjectId,
-    controls,
+    codexProjectId: String(registration?.projectId || project.codexProjectId || "").trim() || undefined,
+    controls: [],
     opened,
-    ctoThreadId: controls.find((item) => item.role === "cto")?.threadId,
-    reviewThreadId: controls.find((item) => item.role === "review")?.threadId,
+    desktopNativePending: true,
+    registration,
+    ctoThreadId: machine.getProject(store.state, project.id).sessions?.find(session => session.role === "cto")?.externalThreadId,
+    reviewThreadId: machine.getProject(store.state, project.id).sessions?.find(session => session.role === "review")?.externalThreadId,
   };
 }
 
-async function ensureProjectFolder(project, codex, { verify = false, syncLegacy = false, waitForProjectMs = 0 } = {}) {
-  if (!project || !codex?.path) return project?.codexProjectId;
-  if (process.env.APH_DISABLE_CODEX_PROJECT_PROVISION === "1") return undefined;
-  const recordCodexProjectSync = (officialProjectId) => {
-    if (!store || !officialProjectId) return;
-    store.update((state) => {
-      const target = machine.getProject(state, project.id);
-      target.codexProjectId = String(officialProjectId);
-      machine.setCodexProjectSync(state, project.id, {
-        officialProjectId: String(officialProjectId),
-      });
-    });
-  };
-  const legacySync = (input) => {
-    if (!allowLegacyCodexStateSync) return undefined;
-    try {
-      return ensureCodexProjectFolder({ ...input, statePath: codexFolderStatePath, enabled: allowLegacyCodexStateSync });
-    } catch (error) {
-      // The Desktop process owns this compatibility JSON and can hold it open
-      // while flushing its own atom state. A legacy-index write must never
-      // block the official app-server Project or a Harness task dispatch.
-      try {
-        errorLog?.capture(error, {
-          operation: "codex-legacy-state-sync",
-          stage: "global-state-write",
-          context: { projectId: project.id, projectPath: project.path },
-        });
-      } catch {}
-      return undefined;
-    }
-  };
-  // Keep the legacy JSON index in sync for older Desktop builds, but use the
-  // public app-server Project API as the source of truth for current Codex.
-  if (syncLegacy && allowLegacyCodexStateSync) {
-    legacySync({
-      projectPath: project.path,
-      projectName: project.name,
-      officialProjectId: project.codexProjectId && !String(project.codexProjectId).startsWith("local-")
-        ? project.codexProjectId
-        : undefined,
-      threadIds: [
-        ...(project.sessions || []).map((session) => session.externalThreadId),
-        ...(project.tasks || []).map((task) => task.run?.externalThreadId),
-      ].filter(Boolean),
-    });
-  }
-  // A valid official ID is stable; do not start a new app-server on every
-  // five-second runtime heartbeat. User-triggered control-plane actions pass
-  // `verify: true` when they need to repair a project deleted in Desktop.
-  if (!verify && project.codexProjectId && !String(project.codexProjectId).startsWith("local-")) {
-    if (!project.codexProjectSync) recordCodexProjectSync(project.codexProjectId);
-    return project.codexProjectId;
-  }
-  const official = await ensureCodexProject({
-    executable: codex.path,
-    cwd: project.path,
-    projectPath: project.path,
-    projectName: project.name,
-    waitForExistingMs: waitForProjectMs,
-  });
-  if (syncLegacy && allowLegacyCodexStateSync) {
-    legacySync({
-      projectPath: project.path,
-      projectName: project.name,
-      officialProjectId: official.projectId,
-      threadIds: [
-        ...(project.sessions || []).map((session) => session.externalThreadId),
-        ...(project.tasks || []).map((task) => task.run?.externalThreadId),
-      ].filter(Boolean),
-    });
-  }
-  if (project.codexProjectId !== official.projectId || !project.codexProjectSync) recordCodexProjectSync(official.projectId);
-  return official.projectId;
+async function openStandardControlConversations(projectId, options = {}) {
+  standardControlOpener ||= createStandardControlOpener({ store,
+    openExternal: uri => shell.openExternal(uri), copyPrompt: text => clipboard.writeText(text) });
+  return standardControlOpener(projectId, options);
+}
+
+async function ensureProjectFolder(project, codex) {
+  if (!project?.path || !codex?.installed) return undefined;
+  const registration = await ensureDesktopProjectRegistration(project, codex, { force: false, trustedRoot: getHarnessTrustedRoot() });
+  return registration?.projectId;
 }
 
 async function reconcileCodexProjectFolders() {
-  if (!store || folderReconcileInFlight) return;
-  folderReconcileInFlight = true;
-  try {
-    const codex = await detectCommand("codex");
-    if (!codex.installed) return;
-    // Do not rewrite Codex's global JSON on the five-second heartbeat. The
-    // Desktop process owns that file and may hold it open; background writes
-    // caused EPERM/last-writer-wins races in the live profile. Compatibility
-    // writes are opt-in via APH_ENABLE_CODEX_LEGACY_STATE_SYNC=1.
-    for (const project of store.state.projects) {
-      if (!machine.shouldAutoProvisionCodexProject(project)) continue;
-      await ensureProjectFolder(project, codex, { syncLegacy: false });
-    }
-  } catch (error) {
-    try {
-      errorLog?.capture(error, { operation: "codex-folder-reconcile" });
-    } catch {
-      // Folder repair is best effort and must never break runtime refresh.
-    }
-  } finally {
-    folderReconcileInFlight = false;
-  }
+  // Desktop owns its live project registry. Harness has no background project
+  // repair path and never writes a compatibility cache from the heartbeat.
+  return undefined;
 }
 
 async function provisionMissingControlThreads() {
-  if (!store) return;
-  // Never start model turns as a side effect of opening the panel. Control
-  // threads are repaired by an explicit user action (new project, Sync
-  // Project, Enter CTO, or task dispatch). An opt-in flag remains for
-  // controlled migration/smoke environments only.
-  if (process.env.APH_AUTO_PROVISION_CONTROLS !== "1") return;
-  const codex = await detectCommand("codex");
-  if (!codex.installed) return;
-  for (const project of store.state.projects) {
-    if (!machine.shouldAutoProvisionCodexProject(project)) continue;
-    let codexProjectId;
-    try {
-      // Startup repair must not rewrite Codex's compatibility JSON while the
-      // Desktop process owns its atom state. Modern app-server Projects are
-      // the source of truth; legacy index writes are explicit opt-in only.
-      codexProjectId = await ensureProjectFolder(project, codex, { syncLegacy: false });
-    } catch (error) {
-      try { errorLog?.capture(error, { operation: "codex-project-provision", projectId: project.id }); } catch {}
-      continue;
-    }
-    const latest = machine.getProject(store.state, project.id);
-    if (!codexProjectId) continue;
-    if (latest.source?.kind === "codex-import" && latest.codexImport?.status !== "completed") continue;
-    for (const session of latest.sessions.filter((item) => ["cto", "review"].includes(item.role))) {
-      try {
-        if (session.externalThreadId && session.externalProjectId === codexProjectId) continue;
-        if (session.externalThreadId) {
-          // The session was created before the official Project existed (or
-          // belongs to a project that was recreated). Keep the old Codex
-          // history untouched, but replace the Harness pointer with a new
-          // control chat that is an actual Project member.
-          store.update((state) => {
-            const target = machine.getProject(state, project.id).sessions.find((item) => item.id === session.id);
-            if (target) {
-              target.externalThreadId = undefined;
-              target.externalProjectId = undefined;
-            }
-          });
-        }
-        await ensureControlThread(latest, session, codex, codexProjectId);
-      } catch (error) {
-        errorLog?.capture(error, { operation: "control-session-provision", projectId: project.id, role: session.role });
-      }
-    }
-  }
+  // Control conversations are created only by an explicit Desktop handoff.
+  return undefined;
 }
 
-function registerLaunchedRuntime(launched, context, { autoReview = false, importMode = false, onImportCandidate = undefined } = {}) {
-  const configuredTask = store.state.projects.find((project) => project.id === context.projectId)?.tasks.find((task) => task.id === context.taskId);
-  const runArchivePath = configuredTask?.run?.id
-    ? path.join(store.contextRoot || path.dirname(store.filePath), "projects", context.projectId, "runs", `${configuredTask.run.id}.jsonl`)
-    : undefined;
-  let rawArchive;
-  let lastArchiveStatAt = 0;
-  let archiveFinalized = false;
-  const finalizeRunArchive = async () => {
-    if (archiveFinalized || !runArchivePath) return;
-    archiveFinalized = true;
-    traceRunArchive("finalize:start", { projectId: context.projectId, taskId: context.taskId, runArchivePath });
-    if (rawArchive) await new Promise((resolve, reject) => {
-      const onError = (error) => reject(error);
-      rawArchive.once("error", onError);
-      rawArchive.end(() => {
-        rawArchive.off("error", onError);
-        traceRunArchive("finalize:closed");
-        resolve();
-      });
-    });
-    try {
-      traceRunArchive("finalize:import-start");
-      const archived = await importTranscript(runArchivePath, store.contextRoot || path.dirname(store.filePath), {
-        projectId: context.projectId,
-        label: `${configuredTask?.title || "Agent run"} · 原始运行`,
-      });
-      store.update((state) => {
-        const project = machine.getProject(state, context.projectId);
-        const task = project.tasks.find((item) => item.id === context.taskId);
-        if (task?.run) {
-          task.run.transcriptBytes = archived.manifest.bytes;
-          task.run.archiveManifestId = archived.manifest.id;
-          task.run.archiveSha256 = archived.manifest.sha256;
-        }
-        project.archiveManifests ||= [];
-        if (!project.archiveManifests.some((item) => item.sha256 === archived.manifest.sha256)) project.archiveManifests.unshift({ ...archived.manifest, manifestPath: archived.manifestPath });
-      });
-      traceRunArchive("finalize:import-done", { bytes: archived.manifest.bytes, manifestId: archived.manifest.id });
-    } catch (error) {
-      traceRunArchive("finalize:error", { error: String(error?.stack || error) });
-      try { errorLog?.capture(error, { operation: "run-archive-finalize", projectId: context.projectId, taskId: context.taskId }); } catch {}
-    }
-  };
-  if (runArchivePath) {
-    try {
-      fs.mkdirSync(path.dirname(runArchivePath), { recursive: true });
-      rawArchive = fs.createWriteStream(runArchivePath, { flags: "a", encoding: "utf8" });
-      rawArchive.once("open", () => traceRunArchive("open:ready", { runArchivePath }));
-      store.update((state) => {
-        const task = machine.getProject(state, context.projectId).tasks.find((item) => item.id === context.taskId);
-        if (task?.run) task.run.transcriptPath = runArchivePath;
-      });
-    } catch {
-      rawArchive = undefined;
-    }
-  }
-  const monitor = createAgentRunMonitor({
-    state: store.state,
-    projectId: context.projectId,
-    taskId: context.taskId,
-    readGit: readGitStatus,
-    autoReview: autoReview || configuredTask?.reviewMode === "auto",
-    importMode,
-    onImportCandidate,
-    onRawMessage: (message) => {
-      if (!rawArchive?.writable) return;
-      const line = `${JSON.stringify({ at: new Date().toISOString(), message })}\n`;
-      traceRunArchive("append:start", { method: message?.method, bytes: Buffer.byteLength(line) });
-      return new Promise((resolve, reject) => rawArchive.write(line, "utf8", (error) => {
-        if (error) return reject(error);
-        traceRunArchive("append:done", { method: message?.method });
-        resolve();
-      })).then(() => {
-        if (Date.now() - lastArchiveStatAt < 1000) return;
-        lastArchiveStatAt = Date.now();
-        try {
-          const stat = fs.statSync(runArchivePath);
-          store.update((state) => {
-            const task = machine.getProject(state, context.projectId).tasks.find((item) => item.id === context.taskId);
-            if (task?.run) task.run.transcriptBytes = stat.size;
-          });
-        } catch {}
-      });
-    },
-    onUpdate: (update) => {
-      traceRunArchive("update:store-start", { type: update.event?.type, kind: update.event?.kind });
-      store.write();
-      traceRunArchive("update:store-done", { type: update.event?.type, kind: update.event?.kind });
-      void publishRuntimeSnapshot(update.event)
-        .then(() => traceRunArchive("snapshot:published", { type: update.event?.type }))
-        .catch((error) => {
-          traceRunArchive("snapshot:error", { type: update.event?.type, error: String(error?.stack || error) });
-          try { errorLog?.capture(error, { operation: "agent-runtime-snapshot", projectId: context.projectId, taskId: context.taskId }); } catch {}
-        });
-    },
-  });
-  const runtime = { client: launched.client, monitor, queue: Promise.resolve() };
-  activeCodexClients.set(launched.threadId, runtime);
-  const consume = (message) => {
-    runtime.queue = runtime.queue.then(() => runtime.intentionalStop ? null : monitor.handleNotification(message)).then(async () => {
-      if (monitor.isTerminal()) {
-        traceRunArchive("terminal:detected", { method: message?.method, threadId: launched.threadId });
-        activeCodexClients.delete(launched.threadId);
-        await finalizeRunArchive();
-        launched.client.close();
-      }
-    }).catch((error) => {
-      traceRunArchive("consume:error", { method: message?.method, error: String(error?.stack || error) });
-      void publishRuntimeSnapshot({ type: "agent.monitor.error", detail: String(error?.message || error) });
-    });
-  };
-  launched.client.on("notification", consume);
-  for (const message of launched.client.notifications || []) consume(message);
-  launched.client.on("exit", () => {
-    void runtime.queue.catch(() => {}).then(() => finalizeRunArchive());
-    if (monitor.isTerminal() || runtime.intentionalStop) return;
-    void (async () => {
-      try {
-        machine.markRunFailed(store.state, context.projectId, context.taskId, "Codex app-server 在任务完成前退出");
-        store.write();
-        await publishRuntimeSnapshot({ type: "agent.process.exit", detail: "Codex app-server 在任务完成前退出" });
-      } catch {
-        // The run may already have been completed by a concurrent notification.
-      }
-    })();
-  });
-  return runtime;
+function registerVisibleThreadRuntime({ threadId } = {}) {
+  // Desktop owns the conversation and does not expose a public observer. Keep
+  // this compatibility boundary inert so a native handoff never starts a
+  // hidden reader or invents completion evidence.
+  return { threadId: String(threadId || ""), native: true, awaitingUser: true };
 }
 
 function emitImportProgress(event, stage, progress, label, detail) {
@@ -739,7 +551,6 @@ function emitImportProgress(event, stage, progress, label, detail) {
   try {
     event?.sender?.send?.("project:onboarding-progress", {
       stage,
-      progress: Math.max(0, Math.min(100, Number(progress) || 0)),
       label,
       ...(detail ? { detail: String(detail).slice(0, 500) } : {}),
     });
@@ -826,187 +637,50 @@ async function resumePendingCodexArchives() {
   }
 }
 
+async function handoffVisibleCodexImport({ codex, project, projectId, taskId, title, prompt, selectedThreadCount }) {
+  clipboard.writeText(prompt);
+  store.update((state) => machine.prepareUserAgentTask(state, projectId, taskId));
+  const navigation = await openCodexDesktop("", project.path, { openExternal: (uri) => shell.openExternal(uri) });
+  store.update((state) => {
+    const target = machine.getProject(state, projectId);
+    target.codexImport = {
+      ...(target.codexImport || {}),
+      status: "awaiting_user",
+      detail: "实际整理提示词已保存并复制到剪贴板；请在这条原生 Codex 对话中粘贴并发送，Harness 不会另起隐藏执行器。",
+    };
+  });
+  return {
+    projectId,
+    taskId,
+    threadId: undefined,
+    status: "awaiting_user",
+    userActionRequired: true,
+    executionOwner: "codex-desktop",
+    conversationPrompt: prompt,
+    selectedThreadCount,
+    desktopOpened: Boolean(navigation.opened),
+    desktopError: navigation.error,
+    navigation,
+  };
+}
+
 /**
  * Resolve an official Codex Project by approximate name and launch a bounded
  * read-only hydration turn. This path is intentionally separate from the
  * legacy local-folder onboarding flow: it never scans recent CWDs and never
  * infers progress from filesystem mtimes.
  */
-async function importCodexProjectFromName(event, input = {}) {
-  let stage = "starting";
-  let mutableProjectId;
-  let mutableTaskId;
-  const query = String(input.name || input.projectName || input.codexProjectId || "").trim();
-  const progress = (nextStage, value, label, detail) => {
-    stage = nextStage;
-    emitImportProgress(event, nextStage, value, label, detail);
-  };
-  try {
-    progress("detecting_codex", 8, "正在连接 Codex");
-    const codex = await detectCommand("codex");
-    if (!codex.installed) throw new Error("未检测到 Codex，无法拉取既有 Project");
-    if (!query) throw new Error("请输入 Codex 项目名称或简称");
+async function importCodexProjectFromName() { throw desktopNativeBlocked("导入既有 Codex Project", "Harness 尚未接通 Desktop 原生接口的 Project/thread 列表；当前只能连接本地目录"); }
 
-    progress("discovering_project", 24, "正在读取官方 Codex Project 索引", query);
-    const officialProjects = await listCodexProjects({ executable: codex.path, cwd: resolveAppServerCwd({ isPackaged: app.isPackaged, resourcesPath: process.resourcesPath, appPath: app.getAppPath() }) });
-    const direct = input.codexProjectId
-      ? officialProjects.find((item) => String(item?.id || "") === String(input.codexProjectId))
-      : undefined;
-    const resolved = direct
-      ? { project: direct, root: (Array.isArray(direct.roots) ? direct.roots : []).map((entry) => typeof entry === "string" ? { path: entry } : entry).find((entry) => entry?.path) || null, match: { query, score: 1, kind: "id", matchedName: String(direct.id) } }
-      : resolveCodexProjectByName({ name: query, projects: officialProjects });
-    const sourceProjectId = String(resolved.project.id);
-    const sourceProjectName = String(resolved.project.name || sourceProjectId);
-    const targetProject = (input.targetProjectId || input.harnessProjectId)
-      ? store.state.projects.find((item) => item.id === String(input.targetProjectId || input.harnessProjectId))
-      : undefined;
-    const rootPath = selectCodexProjectRoot({
-      project: resolved.project,
-      query,
-      matchedName: resolved.match?.matchedName,
-      requestedPath: input.path || input.root || targetProject?.path,
-    });
-    if (!rootPath) throw new Error(`Codex Project“${sourceProjectName}”没有可用根目录，暂不能启动回填 Agent；请先在 Codex Project 中绑定工作区`);
-    let sourceThreads = [];
-    try {
-      const recentThreads = await listAllCodexThreads({ executable: codex.path, cwd: rootPath, maxThreads: 5000, pageSize: 200 });
-      sourceThreads = selectCodexProjectThreads(recentThreads, {
-        project: resolved.project,
-        query,
-        matchedName: resolved.match?.matchedName,
-        limit: 5000,
-      });
-    } catch (error) {
-      try { errorLog?.capture(error, { operation: "project:import-codex", stage: "thread-index", context: { queryLength: query.length } }); } catch {}
-    }
+async function listCodexConversationPickerIndex() { throw desktopNativeBlocked("读取 Codex 对话索引", "Harness 尚未接通 Desktop 原生接口的对话列表"); }
 
-    progress("saving_state", 42, "正在建立 Harness 导入记录", `${sourceProjectName} · ${rootPath}`);
-    const requested = store.update((state) => machine.requestCodexProjectImport(state, {
-      codexProjectId: sourceProjectId,
-      targetProjectId: input.targetProjectId || input.harnessProjectId,
-      name: sourceProjectName,
-      path: rootPath,
-    }));
-    const projectId = requested.project.id;
-    const taskId = requested.task.id;
-    mutableProjectId = projectId;
-    mutableTaskId = taskId;
-    // An existing active import is never duplicated. If it already has a
-    // thread, just reopen that exact conversation; if it is still queued,
-    // continue below and dispatch the one durable task.
-    if (requested.reused && ["in_progress", "awaiting_result", "review"].includes(requested.task.status)) {
-      const existingThread = requested.task.run?.externalThreadId;
-      if (!existingThread && requested.task.status !== "review") {
-        store.update((state) => machine.markExternalLaunchFailed(state, projectId, taskId, "导入任务没有可恢复的 Codex thread，正在重新启动"));
-      } else {
-      let desktop;
-      if (existingThread) desktop = await openCodexDesktop(codex.path, requested.project.path, { threadId: existingThread, openExternal: (uri) => shell.openExternal(uri), preferProjectPath: process.env.APH_DISABLE_DESKTOP_DEEPLINK === "1" });
-      return { projectId, taskId, threadId: existingThread, status: requested.task.status === "review" ? "awaiting_review" : "running", reused: true, matchedProjectName: sourceProjectName, match: resolved.match, desktopOpened: desktop ? Boolean(desktop.opened) : true, desktopError: desktop?.error, snapshot: await buildSnapshot() };
-      }
-    }
-
-    const dispatched = store.update((state) => {
-      const result = machine.dispatchTask(state, projectId, taskId);
-      const target = machine.getProject(state, projectId);
-      target.codexProjectId = sourceProjectId;
-      machine.setCodexProjectSync(state, projectId, { officialProjectId: sourceProjectId, state: "app-server-confirmed", detail: "已从官方 project/list 找到该 Project；正在启动只读回填。" });
-      target.codexImport = {
-        ...(target.codexImport || {}),
-        status: "running",
-        codexProjectId: sourceProjectId,
-        startedAt: new Date().toISOString(),
-        sourceName: sourceProjectName,
-        sourceRoots: (resolved.project.roots || []).map((entry) => typeof entry === "string" ? entry : entry?.path).filter(Boolean).slice(0, 20),
-        sourceThreads: sourceThreads.map(({ id, name, updatedAt, recencyAt, match, score }) => ({ id, name, updatedAt, recencyAt, match, score })),
-        sourceThreadCount: sourceThreads.length,
-        archiveQueue: sourceThreads.filter((thread) => thread.path).map(({ id, name, path: sourcePath }) => ({ id, name, path: sourcePath })),
-      };
-      return result;
-    });
-    progress("creating_thread", 64, "正在创建 Codex Project 回填对话", sourceProjectName);
-    const latestProject = machine.getProject(store.state, projectId);
-    const importContext = {
-      harness: buildProjectContext(latestProject, { maxTasks: 15, maxCheckpoints: 8, maxEvents: 12 }),
-      codexProject: {
-        id: sourceProjectId,
-        name: sourceProjectName,
-        roots: (resolved.project.roots || []).map((entry) => typeof entry === "string" ? { path: entry } : { path: entry?.path }).filter((entry) => entry.path),
-      },
-      sourceThreads: sourceThreads.slice(0, 20).map(({ id, name, cwd, path: rolloutPath, preview, createdAt, updatedAt, recencyAt, projectId: threadProjectId, gitInfo, match, score }) => ({ id, name, cwd, rolloutPath, preview: String(preview || "").slice(0, 400), createdAt, updatedAt, recencyAt, projectId: threadProjectId, gitInfo, match, score })),
-    };
-    const skillPath = resolveBundledSkillPath({ isPackaged: app.isPackaged, resourcesPath: process.resourcesPath, appPath: app.getAppPath() });
-    const schemaPath = resolveBundledProtocolPath({ fileName: "harness-import.schema.json", isPackaged: app.isPackaged, resourcesPath: process.resourcesPath, appPath: app.getAppPath() });
-    if (!fs.existsSync(skillPath)) throw new Error("Harness 内置 Codex Skill 缺失，已停止导入");
-    if (!fs.existsSync(schemaPath)) throw new Error("Harness 内置导入协议缺失，已停止导入");
-    const launched = await launchHarnessImport({
-      executable: codex.path,
-      project: latestProject,
-      sourceProjectId,
-      skillPath,
-      schemaPath,
-      openExternal: (uri) => shell.openExternal(uri),
-      preferProjectPath: process.env.APH_DISABLE_DESKTOP_DEEPLINK === "1",
-      context: importContext,
-    });
-    store.update((state) => {
-      machine.attachExternalThread(state, projectId, taskId, {
-        threadId: launched.threadId,
-        turnId: launched.turnId,
-        processId: launched.processId,
-        projectId: sourceProjectId,
-        desktopOpened: Boolean(launched.desktop?.opened),
-      });
-      const target = machine.getProject(state, projectId);
-      target.codexImport = { ...(target.codexImport || {}), status: "running", startedAt: target.codexImport?.startedAt || new Date().toISOString(), threadId: launched.threadId };
-    });
-    registerLaunchedRuntime(launched, { projectId, taskId }, {
-      importMode: true,
-      onImportCandidate: async (candidate, metadata = {}) => {
-        if (candidate.source?.codexProjectId && String(candidate.source.codexProjectId) !== sourceProjectId) throw new Error("HARNESS_IMPORT_SOURCE_MISMATCH: 来源 Project 与请求不一致");
-        store.update((state) => machine.recordCodexImportCandidate(state, projectId, taskId, candidate, metadata));
-        await publishRuntimeSnapshot({ type: "codex.project.import.awaiting-review", detail: sourceProjectName });
-      },
-    });
-    // Source rollouts are streamed into the content-addressed archive without
-    // blocking the Agent or injecting their raw bytes into model context.
-    void archiveCodexSourceThreads(projectId, taskId, sourceThreads).catch((error) => {
-      try { errorLog?.capture(error, { operation: "codex-import-source-archive", stage: "background", context: { projectId, taskId } }); } catch {}
-    });
-    progress("waiting_agent", 86, "Codex 正在盘点项目并生成回填候选", "原始运行会单独归档；完成后需要你审核");
-    const snapshot = await buildSnapshot();
-    return {
-      projectId,
-      taskId,
-      threadId: launched.threadId,
-      status: "running",
-      reused: false,
-      matchedProjectName: sourceProjectName,
-      match: resolved.match,
-      desktopOpened: Boolean(launched.desktop?.opened),
-      desktopError: launched.desktop?.error,
-      snapshot,
-    };
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    // If a task was already dispatched, make the failure retryable without
-    // inventing an imported Project. Earlier stages have no mutable target.
-    try {
-      const current = mutableProjectId ? store?.state?.projects?.find((project) => project.id === mutableProjectId) : undefined;
-      const importTask = current?.tasks?.find((task) => task.id === mutableTaskId && ["in_progress", "awaiting_result"].includes(task.status));
-      if (current && importTask) store.update((state) => machine.markExternalLaunchFailed(state, current.id, importTask.id, message));
-    } catch {}
-    let errorId;
-    try { errorId = errorLog?.capture(error, { operation: "project:import-codex", stage, context: { queryLength: query.length } })?.id; } catch {}
-    throw new Error(errorId ? `${message}\n错误编号：${errorId}` : message);
-  }
-}
+async function importCodexConversations() { throw desktopNativeBlocked("导入已选 Codex 对话", "Harness 尚未接通 Desktop 原生接口的对话选择和读取"); }
 
 async function connectHarnessProject(projectId, payload = {}) {
   let project = machine.getProject(store.state, projectId);
   let projectPath = String(payload.path || payload.projectPath || project.path || "").trim();
   if (!projectPath) {
-    const dataRoot = store.contextRoot || path.dirname(store.filePath);
-    projectPath = createManagedWorkspace({ dataRoot, name: project.name }).path;
+    projectPath = createManagedWorkspace({ trustedRoot: getHarnessTrustedRoot(), name: project.name }).path;
     store.update((state) => machine.updateProjectContract(state, projectId, { path: projectPath }));
     project = machine.getProject(store.state, projectId);
   } else {
@@ -1021,7 +695,11 @@ async function connectHarnessProject(projectId, payload = {}) {
     const codex = await detectCommand("codex");
     if (!codex.installed) throw Object.assign(new Error("未检测到 Codex，项目已保留为可重试的本地项目"), { code: "CODEX_MISSING" });
     stage = "control-plane";
-    const plane = await ensureProjectControlPlane(project, codex, { verifyProject: true, openThreads: true });
+    if (needsProjectInitialization(project)) {
+      const result = await onboardProject(project.name, { projectId });
+      return { ...result, initializationRequired: true, standardControls: { opened: [], skipped: 'initialization-required' } };
+    }
+    const plane = await ensureProjectControlPlane(project, codex, { verifyProject: true, openThreads: true, openRoles: payload.openRoles || ["review", "cto"] });
     markCodexDesktopRegistered(project.id, plane.codexProjectId);
     store.update((state) => {
       const target = machine.getProject(state, project.id);
@@ -1030,7 +708,7 @@ async function connectHarnessProject(projectId, payload = {}) {
       target.codexConnectedAt = new Date().toISOString();
       target.codexSyncError = undefined;
     });
-    return { projectId: project.id, codexProjectId: plane.codexProjectId, ctoThreadId: plane.ctoThreadId, reviewThreadId: plane.reviewThreadId, desktopOpened: plane.opened.every((item) => item.opened) };
+    return { projectId: project.id, codexProjectId: plane.codexProjectId, ctoThreadId: plane.ctoThreadId, reviewThreadId: plane.reviewThreadId, desktopOpened: plane.opened.length > 0 && plane.opened.every((item) => item.opened), standardControls: { opened: plane.opened.filter(item => item.role !== "project") } };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     store.update((state) => machine.recordCodexProjectSyncError(state, project.id, message, stage));
@@ -1042,11 +720,11 @@ async function connectHarnessProject(projectId, payload = {}) {
 }
 
 function registerIpc() {
-  ipcMain.handle("harness:snapshot", buildSnapshot);
+  registerIpcHandle("harness:snapshot", buildSnapshot);
 
-  const guideActions = createGuideActionExecutor({
-    state: guideStore.state,
-    persist: (state) => guideStore.write(state),
+  const operationActions = createOperationExecutor({
+    state: store.state,
+    persist: () => store.write(),
     handlers: {
       "project.create-blank": async (payload) => {
         const project = store.update((state) => machine.createBlankProject(state, payload));
@@ -1056,36 +734,15 @@ function registerIpc() {
     },
   });
 
-  ipcMain.handle("guide:update", async (_event, input = {}) => {
-    guideStore.update((state) => {
-      if (input.locale === "en" || input.locale === "zh-CN") state.locale = input.locale;
-      if (typeof input.dismissed === "boolean") state.dismissed = input.dismissed;
-      if (input.activeProjectId === null || typeof input.activeProjectId === "string") state.activeProjectId = input.activeProjectId || undefined;
-    });
-    return buildSnapshot();
-  });
-  ipcMain.handle("guide:probe", async (_event, subject) => {
-    const allowed = new Set(["codex-desktop", "codex-cli", "codex-login", "app-server", "deep-link", "git", "network", "release-integrity"]);
-    if (!allowed.has(String(subject))) throw new Error("Guide probe is not allowlisted");
-    const probe = await guideProbeRunner.run(String(subject));
-    guideStore.update((state) => { state.probes[String(subject)] = probe; });
-    return { probe, snapshot: await buildSnapshot() };
-  });
-  ipcMain.handle("guide:cancel-probe", (_event, subject) => guideProbeRunner.cancel(String(subject || "")));
-  ipcMain.handle("guide:operation", (_event, operationId) => guideActions.lookup(String(operationId || "")));
-
   const openTask = createTaskOpenHandler({
     store,
     machine,
     detectCodex: () => detectCommand("codex"),
     openDesktop: openCodexDesktop,
-    terminateProcessTree: terminateCodexProcessTree,
-    isProcessAlive,
     buildSnapshot,
     openExternal: (uri) => shell.openExternal(uri),
     openWorkspace: (projectPath) => shell.openPath(projectPath),
-    listThreads: ({ executable, cwd }) => listRecentCodexThreads({ executable, cwd }),
-    isThreadActive: (threadId) => activeCodexClients.has(threadId),
+    isThreadActive: (threadId) => hasRuntimeForThread(threadId),
   });
   const openProject = createProjectOpenHandler({
     store,
@@ -1094,79 +751,37 @@ function registerIpc() {
     openDesktop: openCodexDesktop,
     buildSnapshot,
     openExternal: (uri) => shell.openExternal(uri),
-    listThreads: ({ executable, cwd }) => listRecentCodexThreads({ executable, cwd }),
-    isThreadActive: (threadId) => activeCodexClients.has(threadId),
+    isThreadActive: (threadId) => hasRuntimeForThread(threadId),
   });
 
-  const onboardProject = createProjectOnboarding({
+  onboardProject = createProjectOnboarding({
     store,
     getCodex: () => detectCommand("codex"),
-    appServerCwd: resolveAppServerCwd({
-      isPackaged: app.isPackaged,
-      resourcesPath: process.resourcesPath,
-      appPath: app.getAppPath(),
-    }),
-    listProjects: ({ executable, cwd }) => listCodexProjects({ executable, cwd }),
-    skillPath: resolveBundledSkillPath({
-      isPackaged: app.isPackaged,
-      resourcesPath: process.resourcesPath,
-      appPath: app.getAppPath(),
-    }),
+    copyPrompt: text => clipboard.writeText(text),
+    skillPath: getHarnessProtocolPaths().taskSkillPath,
+    writebackSkillPath: getHarnessProtocolPaths().writebackSkillPath,
+    taskStatusSchemaPath: getHarnessProtocolPaths().taskStatusSchemaPath,
+    protocolPaths: getProtocolPromptPaths(),
     openExternal: (uri) => shell.openExternal(uri),
     ensureProjectFolder: async (input) => {
-      // Do not pre-write the Desktop-owned compatibility JSON. It can race
-      // with Codex's atom flush and erase newer Projects. The official
-      // app-server call below is the durable creation path; legacy mapping is
-      // retained only for an explicit compatibility opt-in.
-      let folder;
-      if (allowLegacyCodexStateSync) {
-        try { folder = ensureCodexProjectFolder({ ...input, statePath: codexFolderStatePath, enabled: allowLegacyCodexStateSync }); } catch (error) {
-          try { errorLog?.capture(error, { operation: "codex-legacy-state-sync", stage: "onboarding-prewrite" }); } catch {}
-        }
-      }
-      if (process.env.APH_DISABLE_CODEX_PROJECT_PROVISION === "1") return { legacyProjectId: folder?.projectId };
-      const official = await ensureCodexProject({
-        executable: input.executable,
-        cwd: input.cwd || input.projectPath,
-        projectPath: input.projectPath,
-        projectName: input.projectName,
-      });
-      if (allowLegacyCodexStateSync) {
-        try {
-          folder = ensureCodexProjectFolder({
-            ...input,
-            officialProjectId: official.projectId,
-            statePath: codexFolderStatePath,
-            enabled: allowLegacyCodexStateSync,
-          });
-        } catch (error) {
-          try { errorLog?.capture(error, { operation: "codex-legacy-state-sync", stage: "onboarding-postwrite" }); } catch {}
-        }
-      }
-      return { ...official, legacyProjectId: folder?.projectId };
-    },
-    assignThreadToProjectFolder: (input) => {
-      if (!allowLegacyCodexStateSync) return { skipped: true, ...input };
-      return assignCodexThreadToProjectFolder({ ...input, statePath: codexFolderStatePath, enabled: allowLegacyCodexStateSync });
-    },
-    ensureControlSessions: async ({ project, codex, folder }) => {
-      for (const session of project.sessions.filter((item) => ["cto", "review"].includes(item.role) && !item.externalThreadId)) {
-        await ensureControlThread(project, session, codex, folder?.projectId);
-      }
+      return ensureDesktopProjectRegistration(
+        { id: `onboarding:${input.projectPath}`, path: input.projectPath, name: input.projectName },
+        { installed: true, native: true },
+        { force: true, trustedRoot: getHarnessTrustedRoot() },
+      );
     },
     buildSnapshot,
-    onLaunched(launched, context) { registerLaunchedRuntime(launched, context, { autoReview: process.env.APH_AUTO_REVIEW === "1" }); },
   });
   const handleOnboarding = createOnboardingIpcHandler({ onboardProject, errorLog });
-  ipcMain.handle("project:add-by-name", handleOnboarding);
-  // Blank creation is deliberately local-only: unlike onboarding it never
-  // searches Codex/recent CWDs and never starts an Agent. The resulting
-  // project can be filled by hand before the user opts into a Codex session.
-  ipcMain.handle("project:create-blank", async (_event, input) => {
+  registerIpcHandle("project:add-by-name", handleOnboarding);
+  // Blank creation creates the durable local Project and then hands the user
+  // to the Codex Desktop project deep link.
+  registerIpcHandle("project:create-blank", async (event, input) => {
     const payload = typeof input === "string" ? { name: input } : (input || {});
     let projectId;
+    emitImportProgress(event, "creating_project", 10, "正在建立 Harness 项目", String(payload.name || ""));
     if (payload.operationId) {
-      const operation = await guideActions.execute({
+      const operation = await operationActions.execute({
         operationId: String(payload.operationId),
         actionId: "project.create-blank",
         targetFingerprint: String(payload.targetFingerprint || `blank:${String(payload.name || "").normalize("NFKC").trim().toLowerCase()}`),
@@ -1177,24 +792,29 @@ function registerIpc() {
     } else {
       projectId = store.update((state) => machine.createBlankProject(state, payload)).id;
     }
-    return { projectId, snapshot: await buildSnapshot() };
+    emitImportProgress(event, "creating_codex_project", 34, "正在通过 Desktop 原生深链注册 Project", String(payload.name || ""));
+    const connected = await connectHarnessProject(projectId, { ...payload, openRoles: ["review", "cto"] });
+    emitImportProgress(event, connected.initializationRequired ? "initializing" : "opening_cto", 82,
+      connected.initializationRequired ? "已准备初始化，等待 Desktop 执行和回写" : "已请求 Desktop 标准对话草稿");
+    const snapshot = await buildSnapshot();
+    emitImportProgress(event, "completed", 100, "项目已创建，请在 Desktop 中继续");
+    return { ...connected, blankOnly: true, snapshot };
   });
-  ipcMain.handle("project:connect-codex", async (_event, projectId, input = {}) => {
+  registerIpcHandle("project:connect-codex", async (_event, projectId, input = {}) => {
     const payload = { ...input, projectId };
     const operationId = String(input.operationId || "").trim();
     const result = operationId
-      ? await guideActions.execute({ operationId, actionId: "project.connect", targetFingerprint: String(input.targetFingerprint || `project:${projectId}`), confirmedAt: input.confirmedAt, payload })
+      ? await operationActions.execute({ operationId, actionId: "project.connect", targetFingerprint: String(input.targetFingerprint || `project:${projectId}`), confirmedAt: input.confirmedAt, payload })
       : { result: await connectHarnessProject(projectId, payload) };
     return { ...result.result, snapshot: await buildSnapshot() };
   });
-  ipcMain.handle("project:create-connected", async (_event, input) => {
+  registerIpcHandle("project:create-connected", async (_event, input) => {
     const payload = input && typeof input === "object" ? input : { name: input };
     const name = String(payload.name || payload.title || "").trim();
     if (!name) throw new Error("Project name is required");
     let projectPath = String(payload.path || payload.projectPath || "").trim();
     if (!projectPath) {
-      const dataRoot = store.contextRoot || path.dirname(store.filePath);
-      projectPath = createManagedWorkspace({ dataRoot, name }).path;
+      projectPath = createManagedWorkspace({ trustedRoot: getHarnessTrustedRoot(), name }).path;
     } else projectPath = ensureProjectDirectory(projectPath);
     const project = store.update((state) => {
       const duplicate = state.projects.find((item) => item.path && path.resolve(item.path).toLowerCase() === projectPath.toLowerCase());
@@ -1206,7 +826,7 @@ function registerIpc() {
       });
     });
     try {
-      const connected = await connectHarnessProject(project.id, { ...payload, path: projectPath });
+      const connected = await connectHarnessProject(project.id, { ...payload, path: projectPath, openRoles: ["review", "cto"] });
       return {
         ...connected,
         snapshot: await buildSnapshot(),
@@ -1218,11 +838,13 @@ function registerIpc() {
   // Codex import is a separate path from local-folder onboarding. It resolves
   // an official Project by approximate name, launches one read-only hydration
   // turn, and leaves the structured result behind a user review gate.
-  ipcMain.handle("project:import-codex", (event, input) => importCodexProjectFromName(event, input || {}));
-  ipcMain.handle("diagnostics:show-error-log", () => diagnostics.showErrorLog());
-  ipcMain.handle("diagnostics:report-renderer-error", (_event, details) => diagnostics.reportRendererError(details));
+  registerIpcHandle("project:import-codex", (event, input) => importCodexProjectFromName(event, input || {}));
+  registerIpcHandle("codex:list-conversations", () => listCodexConversationPickerIndex());
+  registerIpcHandle("project:import-codex-conversations", (event, input) => importCodexConversations(event, input || {}));
+  registerIpcHandle("diagnostics:show-error-log", () => diagnostics.showErrorLog());
+  registerIpcHandle("diagnostics:report-renderer-error", (_event, details) => diagnostics.reportRendererError(details));
 
-  ipcMain.handle("project:select", async (_event, projectId) => {
+  registerIpcHandle("project:select", async (_event, projectId) => {
     store.update((state) => {
       machine.getProject(state, projectId);
       state.selectedProjectId = projectId;
@@ -1230,95 +852,100 @@ function registerIpc() {
     return buildSnapshot();
   });
 
-  ipcMain.handle("task:create", async (_event, projectId, input) => {
+  registerIpcHandle("task:create", async (_event, projectId, input) => {
     store.update((state) => machine.createTask(state, projectId, input || {}));
     return buildSnapshot();
   });
 
-  ipcMain.handle("task:dispatch", async (_event, projectId, taskId) => {
-    try {
+  // Bind an already materialized, Desktop-owned Codex thread to a freshly
+  // dispatched Harness task. This is used for reconnects and fixed real-smoke
+  // fixtures; it never creates a provider thread or starts a hidden turn.
+  registerIpcHandle("task:attach-visible-thread", async (_event, projectId, taskId, input = {}) => {
     const project = machine.getProject(store.state, projectId);
-    const task = project.tasks.find((item) => item.id === taskId);
-    // Import retries must use the dedicated read-only Project hydration
-    // protocol; routing them through the ordinary task prompt would emit a
-    // harness-result and silently lose the Codex Project history.
-    if (task?.workstream === "codex-project-import") {
-      return importCodexProjectFromName(_event, {
-        name: project.codexImport?.sourceName || project.codexImport?.codexProjectId || project.name,
-        codexProjectId: project.codexImport?.codexProjectId,
-        targetProjectId: project.id,
-        path: project.path,
-      });
-    }
-    if (task?.agent === "claude" || task?.agent === "hermes") {
-      const prepared = store.update((state) => machine.prepareUserAgentTask(state, projectId, taskId));
-      clipboard.writeText(prepared.missionPacket);
-      return { snapshot: await buildSnapshot(), missionPacket: prepared.missionPacket, userActionRequired: true, agent: task.agent };
-    }
+    const threadId = String(input.threadId || "").trim();
+    if (!threadId) throw new Error("可见 Codex threadId 不能为空");
     const codex = await detectCommand("codex");
-    if (!codex.installed) throw new Error("未检测到 Codex，无法启动任务");
-    // Create/resolve the real Codex Desktop Project before mutating Harness
-    // task state. A failed project provision must not leave a task falsely
-    // marked as running without a place to continue it.
-    const plane = await ensureProjectControlPlane(project, codex, { verifyProject: true, openThreads: false });
-    const codexProjectId = plane.codexProjectId;
-    const result = store.update((state) => machine.dispatchTask(state, projectId, taskId));
-    clipboard.writeText(result.missionPacket);
-    if (codex.installed && process.env.APH_DISABLE_AGENT_LAUNCH !== "1") {
-      const skillPath = resolveBundledSkillPath({
-        isPackaged: app.isPackaged,
-        resourcesPath: process.resourcesPath,
-        appPath: app.getAppPath(),
+    if (!codex.installed) throw new Error("未检测到 Codex，无法绑定可见对话");
+    let attached;
+    try {
+      attached = store.update((state) => {
+        const dispatched = machine.dispatchTask(state, projectId, taskId);
+        return machine.attachUserInvokedThread(state, projectId, taskId, {
+          threadId,
+          projectId: project.codexProjectId,
+          userPrompt: taskPrompt(machine.getProject(state, projectId), dispatched.task, input.userPrompt || dispatched.missionPacket, getProtocolPromptPaths()),
+          desktopOpened: true,
+        });
       });
-      void launchHarnessTask({
-        executable: codex.path,
-        project,
-        task: result.task,
-        missionPacket: result.missionPacket,
-        skillPath,
-        projectId: codexProjectId,
-        openExternal: (uri) => shell.openExternal(uri),
-        preferProjectPath: false,
-      }).then((launched) => {
-        store.update((state) => machine.attachExternalThread(state, projectId, taskId, {
-          threadId: launched.threadId,
-          turnId: launched.turnId,
-          processId: launched.processId,
-          projectId: launched.projectId || codexProjectId,
-          desktopOpened: launched.desktop.opened,
-        }));
-        if (allowLegacyCodexStateSync) try {
-          assignCodexThreadToProjectFolder({
-            threadId: launched.threadId,
-            projectId: codexProjectId,
-            statePath: codexFolderStatePath,
-            enabled: allowLegacyCodexStateSync,
-          });
-        } catch {
-          // Codex folder grouping is best effort; task monitoring remains usable.
-        }
-        registerLaunchedRuntime(launched, { projectId, taskId }, { autoReview: process.env.APH_AUTO_REVIEW === "1" });
-        void publishRuntimeSnapshot({ type: "agent.run.started", detail: result.task.title });
-      }).catch((error) => {
-        try {
-          errorLog?.capture(error, { operation: "task:dispatch", stage: "launch", context: { projectId, taskId } });
-          store.update((state) => machine.markExternalLaunchFailed(state, projectId, taskId, error?.message || error));
-          void publishRuntimeSnapshot({ type: "agent.run.failed", detail: String(error?.message || error) });
-        } catch {
-          // The task may have been changed by a concurrent user action.
-        }
-      });
+    } catch (error) {
+      // Binding is another hand-off boundary.  If dispatch succeeded but the
+      // supplied visible thread could not be attached, clean the durable run
+      // immediately instead of leaving an in-progress task with no usable
+      // external identity.  The caller still receives the original error.
+      try {
+        store.update((state) => {
+          const current = machine.getProject(state, projectId).tasks.find((item) => item.id === taskId);
+          if (current?.run && !current.run.externalThreadId) {
+            machine.markExternalLaunchFailed(state, projectId, taskId, error?.message || error);
+          }
+        });
+      } catch {
+        // Preserve the attach error for the IPC boundary below.
+      }
+      throw error;
     }
-    return { snapshot: await buildSnapshot(), missionPacket: result.missionPacket };
+    registerVisibleThreadRuntime({
+      cwd: project.path,
+      threadId,
+      ignoreTurnId: input.ignoreTurnId,
+      projectId,
+      taskId,
+    });
+    return { snapshot: await buildSnapshot(), task: attached, threadId, reused: true };
+  });
+
+  registerIpcHandle("task:dispatch", async (_event, projectId, taskId) => {
+    try {
+      const project = machine.getProject(store.state, projectId);
+      const task = project.tasks.find((item) => item.id === taskId);
+      if (!task) throw new Error("Task not found");
+      if (task.workstream === "codex-project-import") {
+        throw desktopNativeBlocked("导入 Codex 对话", "Desktop 原生接口未公开历史对话读取面；请在 Desktop 中直接发起整理对话");
+      }
+      if (task.agent === "claude" || task.agent === "hermes") {
+        const prepared = store.update((state) => machine.prepareUserAgentTask(state, projectId, taskId));
+        clipboard.writeText(prepared.missionPacket);
+        return { snapshot: await buildSnapshot(), missionPacket: prepared.missionPacket, userActionRequired: true, agent: task.agent };
+      }
+      if (task.agent !== "codex") throw new Error("Unsupported agent");
+      const codex = await detectCommand("codex");
+      if (!codex.installed) throw new Error("未检测到 Codex，无法创建原生可见任务");
+      await ensureProjectControlPlane(project, codex, { verifyProject: true, openThreads: false });
+      const latestProject = machine.getProject(store.state, projectId);
+      const prepared = store.update((state) => machine.prepareUserAgentTask(state, projectId, taskId));
+      const userPrompt = taskPrompt(latestProject, prepared.task, prepared.missionPacket, getProtocolPromptPaths());
+      store.update(state => {
+        machine.getProject(state, projectId).tasks.find(item => item.id === taskId).run.userPrompt = userPrompt;
+      });
+      clipboard.writeText(userPrompt);
+      const navigation = await openCodexDesktop("", latestProject.path, { prompt: userPrompt, openExternal: (uri) => shell.openExternal(uri) });
+      return {
+        snapshot: await buildSnapshot(),
+        missionPacket: userPrompt,
+        userActionRequired: true,
+        agent: "codex",
+        executionOwner: "codex-desktop",
+        navigation,
+        message: navigation.opened ? "已通过 Desktop 原生深链打开新对话；任务包已复制，请在 Desktop 中发送。" : "任务包已复制，但 Desktop 原生新对话未打开。",
+      };
     } catch (error) {
       let errorId;
       try { errorId = errorLog?.capture(error, { operation: "task:dispatch", stage: "preflight", context: { projectId, taskId } })?.id; } catch {}
       const message = error instanceof Error ? error.message : String(error);
-      throw new Error(errorId ? `${message}\n错误编号：${errorId}` : message);
+      throw new Error(errorId ? message + "\n错误编号：" + errorId : message);
     }
   });
-
-  ipcMain.handle("task:submit-result", async (_event, projectId, taskId, input) => {
+  registerIpcHandle("task:submit-result", async (_event, projectId, taskId, input) => {
     store.update((state) => {
       machine.submitTaskResult(state, projectId, taskId, input || {});
       // Manual submission is a recovery path. It follows the same automatic
@@ -1330,23 +957,22 @@ function registerIpc() {
     return buildSnapshot();
   });
 
-  ipcMain.handle("task:stop", async (_event, projectId, taskId) => {
+  registerIpcHandle("task:stop", async (_event, projectId, taskId) => {
     const project = machine.getProject(store.state, projectId);
     const task = project.tasks.find((item) => item.id === taskId);
     const threadId = task?.run?.externalThreadId;
-    const runtime = threadId ? activeCodexClients.get(threadId) : undefined;
+  const runtime = threadId ? runtimeForThread(threadId) : undefined;
     if (runtime) {
       runtime.intentionalStop = true;
       try { runtime.client.close(new Error("任务由用户停止")); } catch {}
-      activeCodexClients.delete(threadId);
-    } else if (task?.run?.processId && isProcessAlive(task.run.processId)) {
-      await terminateCodexProcessTree(task.run.processId);
+    removeRuntimeForThread(threadId, runtime);
     }
     store.update((state) => machine.stopTask(state, projectId, taskId));
     return buildSnapshot();
   });
 
-  ipcMain.handle("task:accept", async (_event, projectId, taskId) => {
+  registerIpcHandle("task:accept", async (_event, projectId, taskId) => {
+    let openStandardControls = false;
     store.update((state) => {
       const project = machine.getProject(state, projectId);
       const task = project.tasks.find((item) => item.id === taskId);
@@ -1364,18 +990,22 @@ function registerIpc() {
         return;
       }
       machine.acceptTaskResult(state, projectId, taskId);
+      openStandardControls = task?.workstream === "project-onboarding";
     });
-    return buildSnapshot();
+    const standardControls = openStandardControls
+      ? await openStandardControlConversations(projectId)
+      : undefined;
+    return { ...(await buildSnapshot()), ...(standardControls ? { standardControls } : {}) };
   });
 
-  ipcMain.handle("task:request-changes", async (_event, projectId, taskId) => {
+  registerIpcHandle("task:request-changes", async (_event, projectId, taskId) => {
     const currentTask = machine.getProject(store.state, projectId).tasks.find((item) => item.id === taskId);
     if (currentTask?.workstream === "codex-project-import" && currentTask.run?.externalThreadId) {
-      const runtime = activeCodexClients.get(currentTask.run.externalThreadId);
+      const runtime = runtimeForThread(currentTask.run.externalThreadId);
       if (runtime) {
         runtime.intentionalStop = true;
         try { runtime.client.close(new Error("用户要求重新盘点 Codex Project")); } catch {}
-        activeCodexClients.delete(currentTask.run.externalThreadId);
+        removeRuntimeForThread(currentTask.run.externalThreadId, runtime);
       }
     }
     store.update((state) => {
@@ -1387,14 +1017,14 @@ function registerIpc() {
     return buildSnapshot();
   });
 
-  ipcMain.handle("task:reject", async (_event, projectId, taskId, reason) => {
+  registerIpcHandle("task:reject", async (_event, projectId, taskId, reason) => {
     const currentTask = machine.getProject(store.state, projectId).tasks.find((item) => item.id === taskId);
     if (currentTask?.workstream === "codex-project-import" && currentTask.run?.externalThreadId) {
-      const runtime = activeCodexClients.get(currentTask.run.externalThreadId);
+      const runtime = runtimeForThread(currentTask.run.externalThreadId);
       if (runtime) {
         runtime.intentionalStop = true;
         try { runtime.client.close(new Error("用户拒绝 Codex 项目导入")); } catch {}
-        activeCodexClients.delete(currentTask.run.externalThreadId);
+        removeRuntimeForThread(currentTask.run.externalThreadId, runtime);
       }
     }
     store.update((state) => {
@@ -1406,53 +1036,96 @@ function registerIpc() {
     return buildSnapshot();
   });
 
-  ipcMain.handle("mission:copy", async (_event, projectId, taskId) => {
+  // The registered channel is equivalent to ipcMain.handle("knowledge:accept", acceptKnowledgeCandidate);
+  registerIpcHandle("knowledge:accept", async (_event, projectId, candidateId) => {
+    store.update((state) => machine.acceptKnowledgeCandidate(state, projectId, candidateId));
+    return buildSnapshot();
+  });
+
+  // The registered channel is equivalent to ipcMain.handle("knowledge:reject", rejectKnowledgeCandidate);
+  registerIpcHandle("knowledge:reject", async (_event, projectId, candidateId, reason) => {
+    store.update((state) => machine.rejectKnowledgeCandidate(state, projectId, candidateId, reason));
+    return buildSnapshot();
+  });
+
+  registerIpcHandle("mission:copy", async (_event, projectId, taskId) => {
     const project = machine.getProject(store.state, projectId);
     const task = project.tasks.find((item) => item.id === taskId);
     if (!task || !task.run) throw new Error("Task has no active run");
     const session = project.sessions.find((item) => item.id === task.run.sessionId);
     if (!session) throw new Error("Session not found");
-    const packet = machine.buildMissionPacket(project, task, session);
+    const packet = task.run?.userPrompt || machine.buildMissionPacket(project, task, session);
     clipboard.writeText(packet);
     return { copied: true, packet };
   });
 
-  ipcMain.handle("git:refresh", async (_event, projectId) => {
+  registerIpcHandle("git:refresh", async (_event, projectId) => {
     machine.getProject(store.state, projectId);
     return buildSnapshot({ forceGithub: true });
   });
 
-  ipcMain.handle("github:refresh", async (_event, projectId) => {
+  registerIpcHandle("github:refresh", async (_event, projectId) => {
     machine.getProject(store.state, projectId);
     return buildSnapshot({ forceGithub: true });
   });
 
-  ipcMain.handle("github:set-remote", async (_event, projectId, remoteUrl, name) => {
+  registerIpcHandle("github:set-remote", async (_event, projectId, remoteUrl, name) => {
     const project = machine.getProject(store.state, projectId);
     const remote = await setGitRemote(project.path, remoteUrl, { name });
     return { remote, snapshot: await buildSnapshot({ forceGithub: true }) };
   });
 
-  ipcMain.handle("project:set-status", async (_event, projectId, status) => {
+  registerIpcHandle("project:set-status", async (_event, projectId, status) => {
     store.update((state) => machine.setProjectStatus(state, projectId, String(status || "active")));
     return buildSnapshot();
   });
 
-  ipcMain.handle("project:archive", async (_event, projectId, reason) => {
-    store.update((state) => machine.archiveProject(state, projectId, reason));
+  registerIpcHandle("project:archive", async (_event, projectId, reason) => {
+    const project = machine.getProject(store.state, projectId);
+    const threadIds = (project.tasks || [])
+      .filter((task) => {
+        const runStatus = String(task.run?.status || "").toLowerCase();
+        return (["in_progress", "awaiting_result"].includes(task.status) || ["starting", "running"].includes(runStatus)) && task.run?.externalThreadId;
+      })
+      .map((task) => task.run.externalThreadId);
+    for (const threadId of threadIds) {
+      const harnessRuntime = activeCodexClients.get(String(threadId));
+      const visibleRuntime = observingCodexThreads.get(String(threadId));
+      const runtime = runtimeForThread(threadId);
+      if (!runtime) continue;
+      runtime.intentionalStop = true;
+      // Closing a Harness-owned Desktop 原生控制面 client stops its turn. For a
+      // visible Desktop-owned thread this only tears down our observer; the
+      // user's Desktop turn is left untouched.
+      try { runtime.client.close(new Error(harnessRuntime ? "项目归档时自动停止任务" : "项目归档时停止 Harness 监视")); } catch {}
+      removeRuntimeForThread(threadId, runtime);
+    }
+    store.update((state) => machine.archiveProjectWithTaskStop(state, projectId, reason));
     return buildSnapshot();
   });
 
-  ipcMain.handle("project:restore", async (_event, projectId) => {
+  registerIpcHandle("project:remove", async (_event, projectId, reason) => {
+    const project = machine.getProject(store.state, projectId);
+    const archivePath = persistRemovedProject(project, reason);
+    try {
+      store.update((state) => machine.removeProject(state, projectId, reason));
+    } catch (error) {
+      try { fs.rmSync(archivePath, { force: true }); } catch {}
+      throw error;
+    }
+    return { removedProjectId: projectId, archivePath, snapshot: await buildSnapshot() };
+  });
+
+  registerIpcHandle("project:restore", async (_event, projectId) => {
     store.update((state) => machine.restoreProject(state, projectId));
     return buildSnapshot();
   });
 
-  ipcMain.handle("project:update-contract", async (_event, projectId, input) => {
+  registerIpcHandle("project:update-contract", async (_event, projectId, input) => {
     store.update((state) => machine.updateProjectContract(state, projectId, input || {}));
     return buildSnapshot();
   });
-  ipcMain.handle("project:refresh-profile", async (_event, projectId) => {
+  registerIpcHandle("project:refresh-profile", async (_event, projectId) => {
     const project = machine.getProject(store.state, projectId);
     const profile = inspectProjectProfile(project.path);
     store.update((state) => {
@@ -1463,52 +1136,52 @@ function registerIpc() {
     });
     return buildSnapshot();
   });
-  ipcMain.handle("project:list-templates", async () => listTemplates());
-  ipcMain.handle("project:apply-template", async (_event, projectId, templateId) => {
+  registerIpcHandle("project:list-templates", async () => listTemplates());
+  registerIpcHandle("project:apply-template", async (_event, projectId, templateId) => {
     store.update((state) => applyProjectTemplate(state, projectId, templateId));
     return buildSnapshot();
   });
 
-  ipcMain.handle("objective:create", async (_event, projectId, input) => {
+  registerIpcHandle("objective:create", async (_event, projectId, input) => {
     store.update((state) => machine.createObjective(state, projectId, input || {}));
     return buildSnapshot();
   });
 
-  ipcMain.handle("objective:set-status", async (_event, projectId, status) => {
+  registerIpcHandle("objective:set-status", async (_event, projectId, status) => {
     store.update((state) => machine.setObjectiveStatus(state, projectId, String(status || "active")));
     return buildSnapshot();
   });
-  ipcMain.handle("project:add-decision", async (_event, projectId, input) => {
+  registerIpcHandle("project:add-decision", async (_event, projectId, input) => {
     store.update((state) => applyDecisionProposal(state, projectId, input || {}));
     return buildSnapshot();
   });
 
-  ipcMain.handle("project:activity", async (_event, projectId, limit) => {
+  registerIpcHandle("project:activity", async (_event, projectId, limit) => {
     const project = machine.getProject(store.state, projectId);
     return machine.getProjectActivity(project, { limit });
   });
 
-  ipcMain.handle("section:create", async (_event, projectId, input) => {
+  registerIpcHandle("section:create", async (_event, projectId, input) => {
     store.update((state) => machine.createSection(state, projectId, input || {}));
     return buildSnapshot();
   });
 
-  ipcMain.handle("section:assign-task", async (_event, projectId, taskId, sectionId) => {
+  registerIpcHandle("section:assign-task", async (_event, projectId, taskId, sectionId) => {
     store.update((state) => machine.assignTaskToSection(state, projectId, taskId, sectionId));
     return buildSnapshot();
   });
 
-  ipcMain.handle("section:close", async (_event, projectId, sectionId, reason) => {
+  registerIpcHandle("section:close", async (_event, projectId, sectionId, reason) => {
     store.update((state) => machine.closeSection(state, projectId, sectionId, reason));
     return buildSnapshot();
   });
 
-  ipcMain.handle("section:archive", async (_event, projectId, sectionId, reason) => {
+  registerIpcHandle("section:archive", async (_event, projectId, sectionId, reason) => {
     store.update((state) => machine.archiveSection(state, projectId, sectionId, reason));
     return buildSnapshot();
   });
 
-  ipcMain.handle("archive:import", async (event, projectId, requestedPath) => {
+  registerIpcHandle("archive:import", async (event, projectId, requestedPath) => {
     const project = machine.getProject(store.state, projectId);
     let sourcePath = String(requestedPath || "").trim();
     if (!sourcePath) {
@@ -1538,25 +1211,25 @@ function registerIpc() {
     return { ...result, canceled: false, snapshot: await buildSnapshot() };
   });
 
-  ipcMain.handle("archive:list", async (_event, projectId) => {
+  registerIpcHandle("archive:list", async (_event, projectId) => {
     machine.getProject(store.state, projectId);
     return listArchiveManifests(store.contextRoot || path.dirname(store.filePath), { projectId });
   });
-  ipcMain.handle("archive:verify", async (_event, projectId, hash) => {
+  registerIpcHandle("archive:verify", async (_event, projectId, hash) => {
     machine.getProject(store.state, projectId);
     const manifest = listArchiveManifests(store.contextRoot || path.dirname(store.filePath), { projectId }).find((item) => item.sha256 === String(hash));
     if (!manifest) throw new Error("Archive manifest not found");
     return verifyArchiveObject(store.contextRoot || path.dirname(store.filePath), manifest);
   });
 
-  ipcMain.handle("archive:open", async (_event, projectId) => {
+  registerIpcHandle("archive:open", async (_event, projectId) => {
     machine.getProject(store.state, projectId);
     const target = path.join(store.contextRoot || path.dirname(store.filePath), "archive");
     const error = await shell.openPath(target);
     return { opened: !error, path: target, ...(error ? { error } : {}) };
   });
 
-  ipcMain.handle("archive:open-run", async (_event, projectId, taskId) => {
+  registerIpcHandle("archive:open-run", async (_event, projectId, taskId) => {
     const project = machine.getProject(store.state, projectId);
     const task = project.tasks.find((item) => item.id === taskId);
     const target = task?.run?.transcriptPath;
@@ -1565,20 +1238,20 @@ function registerIpc() {
     return { opened: !error, path: target, ...(error ? { error } : {}) };
   });
 
-  ipcMain.handle("project:open-ledger", async (_event, projectId) => {
+  registerIpcHandle("project:open-ledger", async (_event, projectId) => {
     const project = machine.getProject(store.state, projectId);
     const target = project.ledger?.path || path.join(store.contextRoot || path.dirname(store.filePath), "projects", project.id, "PROJECT-LEDGER.md");
     const error = await shell.openPath(target);
     return { opened: !error, path: target, ...(error ? { error } : {}) };
   });
 
-  ipcMain.handle("project:open-path", async (_event, projectId) => {
+  registerIpcHandle("project:open-path", async (_event, projectId) => {
     const project = machine.getProject(store.state, projectId);
     if (!project.path) return { opened: false, path: "", error: "空白项目尚未绑定本地目录" };
     const error = await shell.openPath(project.path);
     return { opened: !error, path: project.path, ...(error ? { error } : {}) };
   });
-  ipcMain.handle("window:toggle-pin", async () => {
+  registerIpcHandle("window:toggle-pin", async () => {
     windowPinned = !windowPinned;
     mainWindow?.setAlwaysOnTop(windowPinned, "floating");
     if (windowPrefsPath) {
@@ -1591,7 +1264,7 @@ function registerIpc() {
     return { alwaysOnTop: windowPinned, snapshot: await buildSnapshot() };
   });
 
-  ipcMain.handle("project:export", async (_event, projectId, requestedPath) => {
+  registerIpcHandle("project:export", async (_event, projectId, requestedPath) => {
     const project = machine.getProject(store.state, projectId);
     let target = String(requestedPath || "").trim();
     if (!target) {
@@ -1608,7 +1281,7 @@ function registerIpc() {
     return { canceled: false, path: result.path, sha256: result.sha256, snapshot: await buildSnapshot() };
   });
 
-  ipcMain.handle("project:import", async (_event, requestedPath) => {
+  registerIpcHandle("project:import", async (_event, requestedPath) => {
     let source = String(requestedPath || "").trim();
     if (!source) {
       const picked = await dialog.showOpenDialog({ title: "导入 Harness 项目包", properties: ["openFile"], filters: [{ name: "Harness 项目包", extensions: ["json"] }] });
@@ -1620,67 +1293,49 @@ function registerIpc() {
     return { canceled: false, path: path.resolve(source), snapshot: await buildSnapshot() };
   });
 
-  ipcMain.handle("project:open-cto", async (_event, projectId) => {
-    const project = machine.getProject(store.state, projectId);
+  registerIpcHandle("project:open-cto", async (_event, projectId) => {
+    let project = machine.getProject(store.state, projectId);
     if (!project.path) throw new Error("空白项目还没有项目目录；请先绑定本地工作区，再打开 CTO");
-    let cto = project.sessions.find((item) => item.role === "cto");
-    if (!cto) {
-      store.update((state) => machine.ensureProjectControlSessions(machine.getProject(state, projectId)));
-      cto = machine.getProject(store.state, projectId).sessions.find((item) => item.role === "cto");
+    const ensuredPath = ensureProjectDirectory(project.path);
+    if (path.resolve(ensuredPath).toLowerCase() !== path.resolve(project.path).toLowerCase()) {
+      store.update((state) => machine.updateProjectContract(state, projectId, { path: ensuredPath }));
+      project = machine.getProject(store.state, projectId);
     }
-    if (!cto) throw new Error("CTO 控制 Session 未建立");
+    if (!project.sessions.some((item) => item.role === "cto")) {
+      store.update((state) => machine.ensureProjectControlSessions(machine.getProject(state, projectId)));
+    }
+    if (!project.sessions.find(item => item.role === "cto")?.externalThreadId && needsProjectInitialization(project)) {
+      throw new Error("项目初始化尚未完成；接受初始化结果并写入上下文后才能创建 CTO 对话");
+    }
     const codex = await detectCommand("codex");
     if (!codex.installed) throw new Error("未检测到 Codex，无法打开 CTO Session");
-
-    // Ensure both control threads before opening the requested CTO entry. A
-    // previous implementation only repaired CTO here, leaving Review absent.
-    const plane = await ensureProjectControlPlane(project, codex, { verifyProject: true, openThreads: true });
-    markCodexDesktopRegistered(projectId, plane.codexProjectId);
-    const codexProjectId = plane.codexProjectId;
-    cto = machine.getProject(store.state, projectId).sessions.find((item) => item.role === "cto");
-
-    // Persisting the packet is handled by HarnessStore.write. Repair old
-    // profiles that do not yet have the derived file before opening Desktop.
-    if (!cto || !cto.externalThreadId) throw new Error("CTO 控制 Session 没有 Codex thread");
-    if (codexProjectId) {
-      if (allowLegacyCodexStateSync) try {
-        assignCodexThreadToProjectFolder({ threadId: cto.externalThreadId, projectId: codexProjectId, statePath: codexFolderStatePath, enabled: allowLegacyCodexStateSync });
-      } catch {
-        // Folder grouping is best effort; opening the CTO remains usable.
-      }
-    }
-    store.write();
+    await ensureProjectControlPlane(project, codex, { verifyProject: true, openThreads: false });
     const latestProject = machine.getProject(store.state, projectId);
     const packetPath = latestProject.contextPackets?.cto?.path;
     if (!packetPath) throw new Error("CTO 项目上下文文件未生成");
-    const draftReference = `@${packetPath}`;
-    // Codex app-server has no public composer-draft API. Put the file mention
-    // on the clipboard so the user can paste it into the opened composer and
-    // continue asking questions before sending; nothing is auto-submitted.
+    const draftReference = "@" + packetPath;
     clipboard.writeText(draftReference);
-    const opened = await openCodexDesktop(codex.path, latestProject.path, {
-      threadId: cto.externalThreadId,
+    const cto = latestProject.sessions.find((item) => item.role === "cto");
+    const opened = await openCodexDesktop("", latestProject.path, {
+      threadId: cto?.externalThreadId,
+      prompt: controlPrompt(latestProject, "cto", packetPath),
       openExternal: (uri) => shell.openExternal(uri),
-      // Release smoke can exercise the full IPC and file path without
-      // interrupting the user's existing Desktop window.
-      preferProjectPath: process.env.APH_DISABLE_DESKTOP_DEEPLINK === "1",
     });
-    store.update((state) => machine.markControlSessionOpened(state, projectId, "cto", packetPath));
+    if (opened.opened) {
+      store.update((state) => machine.markControlSessionRequested(state, projectId, "cto", packetPath));
+    }
     return {
       ...opened,
       supported: true,
-      capability: opened.capability ? `${opened.capability}+draft-reference-clipboard` : "thread-deep-link+draft-reference-clipboard",
-      threadId: cto.externalThreadId,
+      capability: (opened.capability || "desktop-native-new-thread-deep-link") + "+draft-reference-clipboard",
+      threadId: cto?.externalThreadId,
       packetPath,
       draftReference,
-      message: opened.opened
-        ? "已打开 CTO 主 Session；精简项目上下文已生成并复制为待发送文件引用（未发送）。"
-        : "CTO 上下文文件已生成并复制为待发送引用，但 Codex Desktop 未能打开，请重试。",
+      message: opened.opened ? (cto?.externalThreadId ? "已请求打开已绑定 CTO 对话；上下文引用已复制。" : "已打开 CTO 草稿入口；自动创建标准对话尚未接通。") : "Desktop CTO 入口未能打开。",
       snapshot: await buildSnapshot(),
     };
   });
-
-  ipcMain.handle("project:new-conversation", async (_event, projectId, input) => {
+  registerIpcHandle("project:new-conversation", async (_event, projectId, input) => {
     const project = machine.getProject(store.state, projectId);
     if (project.status === "archived") throw new Error("已归档项目不能创建新对话，请先恢复项目");
     if (!project.path) throw new Error("空白项目还没有项目目录；请先绑定本地工作区，再创建 Codex 对话");
@@ -1694,95 +1349,112 @@ function registerIpc() {
     }
     const codex = await detectCommand("codex");
     if (!codex.installed) throw new Error("未检测到 Codex，无法创建项目对话");
-    const plane = await ensureProjectControlPlane(project, codex, { verifyProject: true, openThreads: false });
-    const codexProjectId = plane.codexProjectId;
+    await ensureProjectControlPlane(project, codex, { verifyProject: true, openThreads: false });
     const session = store.update((state) => machine.createConversationSession(state, projectId, input || {}));
-    try {
-      const created = await createCodexControlThread({
-        executable: codex.path,
-        projectPath: project.path,
-        name: session.title,
-        projectId: codexProjectId,
-        bootstrapText: [
-          "# AI Project Harness · 项目新对话已就绪",
-          `PROJECT: ${project.name}`,
-          `PROJECT_PATH: ${project.path}`,
-          "这是一个新的项目对话入口。等待用户输入。",
-        ].join("\n"),
-      });
-      store.update((state) => {
-        const target = machine.getProject(state, projectId).sessions.find((item) => item.id === session.id);
-        if (target) { target.externalThreadId = created.threadId; target.externalProjectId = codexProjectId; target.lastOpenedAt = new Date().toISOString(); }
-      });
-      if (allowLegacyCodexStateSync) try { assignCodexThreadToProjectFolder({ threadId: created.threadId, projectId: codexProjectId, statePath: codexFolderStatePath, enabled: allowLegacyCodexStateSync }); } catch {}
-      const opened = await openCodexDesktop(codex.path, project.path, { threadId: created.threadId, openExternal: (uri) => shell.openExternal(uri), preferProjectPath: process.env.APH_DISABLE_DESKTOP_DEEPLINK === "1" });
-      return { ...opened, supported: true, threadId: created.threadId, message: opened.opened ? "已创建并打开项目新对话。" : "项目新对话已创建，但 Codex Desktop 未能自动打开。", snapshot: await buildSnapshot() };
-    } catch (error) {
-      store.update((state) => {
-        const target = machine.getProject(state, projectId).sessions.find((item) => item.id === session.id);
-        if (target) { target.status = "retired"; target.error = String(error?.message || error); }
-      });
-      throw error;
-    }
+    const latestProject = machine.getProject(store.state, projectId);
+    const packet = machine.buildMissionPacket(latestProject, { title: session.title, workstream: session.workstream, criteria: [], sectionId: undefined }, session);
+    clipboard.writeText(packet);
+    store.update((state) => {
+      const target = machine.getProject(state, projectId).sessions.find((item) => item.id === session.id);
+      if (target) {
+        target.status = "awaiting_result";
+        target.pendingDraftPath = latestProject.ledger?.path;
+        target.lastOpenRequestedAt = new Date().toISOString();
+      }
+    });
+    const opened = await openCodexDesktop("", latestProject.path, { prompt: packet, openExternal: (uri) => shell.openExternal(uri) });
+    return { ...opened, supported: true, capability: opened.capability, threadId: undefined, message: opened.opened ? "已通过 Desktop 原生深链打开新项目对话；任务包已复制，请在 Desktop 中发送。" : "任务包已复制，但 Desktop 原生新对话未打开。", snapshot: await buildSnapshot() };
   });
 
-  ipcMain.handle("project:open-session", async (_event, projectId, sessionId) => {
+  registerIpcHandle("project:open-session", async (_event, projectId, sessionId) => {
     let project = machine.getProject(store.state, projectId);
     let session = project.sessions.find((item) => item.id === sessionId);
     if (!session) throw new Error("Session not found");
-    if (session.externalThreadId && session.agent === "codex") {
-      const codex = await detectCommand("codex");
-      if (codex.installed) {
-        try {
-          const health = await inspectCodexThread({ executable: codex.path, cwd: project.path, threadId: session.externalThreadId });
-          if (!health.readable) {
-            const officialId = await ensureProjectFolder(project, codex, { verify: true });
-            await ensureControlThread(project, session, codex, officialId, { verifyExisting: true });
-            project = machine.getProject(store.state, projectId);
-            session = project.sessions.find((item) => item.id === sessionId);
-          }
-        } catch (error) {
-          // A transient app-server read failure should not hide the existing
-          // deep link; the opener below still reports a concrete Desktop error.
-          try { errorLog?.capture(error, { operation: "project:open-session", stage: "history-probe", context: { projectId, sessionId } }); } catch {}
-        }
+    if (session.agent === "codex") {
+      if (["cto", "review"].includes(session.role) && !session.externalThreadId && needsProjectInitialization(project)) {
+        throw new Error("项目初始化尚未完成；接受初始化结果并写入上下文后才能创建标准对话");
       }
-      const opened = await openCodexDesktop(codex.path, project.path, { threadId: session.externalThreadId, openExternal: (uri) => shell.openExternal(uri), preferProjectPath: process.env.APH_DISABLE_DESKTOP_DEEPLINK === "1" || activeCodexClients.has(session.externalThreadId) });
-      store.update((state) => {
-        const target = machine.getProject(state, projectId).sessions.find((item) => item.id === sessionId);
-        if (target) target.lastOpenedAt = new Date().toISOString();
-      });
+      const codex = await detectCommand("codex");
+      if (!codex.installed) throw new Error("未检测到 Codex Desktop");
+      const prompt = ['cto', 'review'].includes(session.role)
+        ? controlPrompt(project, session.role, project.contextPackets?.[session.role]?.path) : undefined;
+      if (prompt && session.externalThreadId) clipboard.writeText(prompt);
+      const opened = await openCodexDesktop("", project.path, { threadId: session.externalThreadId, prompt, openExternal: (uri) => shell.openExternal(uri) });
+      if (opened.opened) {
+        store.update((state) => {
+          const target = machine.getProject(state, projectId).sessions.find((item) => item.id === sessionId);
+          if (!target) return;
+          if (["cto", "review"].includes(target.role)) {
+            machine.markControlSessionRequested(state, projectId, target.role, target.pendingDraftPath);
+          } else {
+            target.lastOpenRequestedAt = new Date().toISOString();
+          }
+        });
+      }
       return { ...opened, supported: true, threadId: session.externalThreadId, message: opened.opened ? "已打开项目对话。" : "项目对话已存在，但 Desktop 未能打开。", snapshot: await buildSnapshot() };
     }
     const error = await shell.openPath(project.path);
     return { opened: !error, supported: true, capability: "user-invoked-workspace", message: !error ? "已打开项目工作区，请在对应 Agent 中继续。" : `工作区未能打开：${error}`, snapshot: await buildSnapshot(), ...(error ? { error } : {}) };
   });
 
-  ipcMain.handle("task:open-agent", (_event, projectId, taskId) => openTask(projectId, taskId));
-  ipcMain.handle("task:open-workspace", async (_event, projectId, taskId) => {
+  registerIpcHandle("project:attach-control-thread", async (_event, projectId, role, input = {}) => {
+    const normalizedRole = String(role || "").trim().toLowerCase();
+    if (!["cto", "review"].includes(normalizedRole)) throw new Error("控制对话角色必须是 cto 或 review");
+    const threadId = String(input.threadId || "").trim();
+    if (!threadId) throw new Error("控制对话 threadId 不能为空");
+    store.update((state) => machine.attachControlSessionThread(state, projectId, normalizedRole, {
+      threadId,
+      projectId: input.externalProjectId || input.codexProjectId,
+      packetPath: input.packetPath,
+      expectedThreadId: input.expectedThreadId,
+    }));
+    return { attached: true, verified: false, role: normalizedRole, threadId, snapshot: await buildSnapshot() };
+  });
+
+  registerIpcHandle("task:open-agent", (_event, projectId, taskId) => openTask(projectId, taskId));
+  registerIpcHandle("task:open-workspace", async (_event, projectId, taskId) => {
     const project = machine.getProject(store.state, projectId);
     const task = project.tasks.find((item) => item.id === taskId);
     if (!task) throw new Error("Task not found");
     const error = await shell.openPath(project.path);
     return { opened: !error, path: project.path, agent: task.agent, ...(error ? { error } : {}) };
   });
-  ipcMain.handle("project:open-codex", async (_event, projectId) => {
-    const project = machine.getProject(store.state, projectId);
+  registerIpcHandle("project:open-codex", async (_event, projectId) => {
+    let project = machine.getProject(store.state, projectId);
     if (!project.path) throw new Error("这是空白项目；请先填写项目目录，再连接 Codex Project");
+    const ensuredPath = ensureProjectDirectory(project.path);
+    if (path.resolve(ensuredPath).toLowerCase() !== path.resolve(project.path).toLowerCase()) {
+      store.update((state) => machine.updateProjectContract(state, projectId, { path: ensuredPath }));
+      project = machine.getProject(store.state, projectId);
+    }
     const codex = await detectCommand("codex");
     if (codex.installed && project.status !== "archived") {
+      if (needsProjectInitialization(project)) {
+        const initialization = await connectHarnessProject(projectId);
+        return { opened: initialization.desktopOpened === true, supported: true, capability: "desktop-native-initialization-draft",
+          message: "项目初始化待执行；标准对话等待初始化结果回写。", snapshot: await buildSnapshot() };
+      }
       const plane = await ensureProjectControlPlane(project, codex, { verifyProject: true, openThreads: true });
       markCodexDesktopRegistered(projectId, plane.codexProjectId);
+      // Existing projects may already have an official Project id and therefore
+      // skip the registration deep link. Fill any missing standard handoffs
+      // through the same idempotent Desktop-only path.
+      await openStandardControlConversations(projectId);
     }
     return openProject(projectId);
   });
-  ipcMain.handle("project:sync-codex", async (_event, projectId) => {
-    const project = machine.getProject(store.state, projectId);
+  registerIpcHandle("project:sync-codex", async (_event, projectId) => {
+    let project = machine.getProject(store.state, projectId);
     if (!project.path) throw new Error("空白项目还没有项目目录；请先在项目契约中绑定本地工作区");
+    const ensuredPath = ensureProjectDirectory(project.path);
+    if (path.resolve(ensuredPath).toLowerCase() !== path.resolve(project.path).toLowerCase()) {
+      store.update((state) => machine.updateProjectContract(state, projectId, { path: ensuredPath }));
+      project = machine.getProject(store.state, projectId);
+    }
     const codex = await detectCommand("codex");
     if (!codex.installed) throw new Error("未检测到 Codex，无法同步 Project");
     try {
-      const plane = await ensureProjectControlPlane(project, codex, { verifyProject: true, openThreads: true, forceRegistration: true });
+      const plane = await ensureProjectControlPlane(project, codex, { verifyProject: true, openThreads: true, forceRegistration: true, forceOpenThreads: true });
       markCodexDesktopRegistered(projectId, plane.codexProjectId);
       return buildSnapshot();
     } catch (error) {
@@ -1827,12 +1499,15 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
-  const projectPath = resolveAppServerCwd({
-    isPackaged: app.isPackaged,
-    resourcesPath: process.resourcesPath,
-    appPath: app.getAppPath(),
-  });
+  const projectPath = app.getAppPath();
   const dataRoot = resolveDataRoot({ userDataPath: app.getPath("userData") });
+  // The program owns one stable, trusted parent for all generated project
+  // folders. Codex only needs the user trust this parent once.
+  getHarnessTrustedRoot();
+  // Resolve and validate the bundled handoff protocol once per app process.
+  // All later Codex turns reuse these absolute paths; a new process resolves
+  // them again against its current dev or packaged runtime location.
+  getHarnessProtocolPaths();
   const statePath = path.join(dataRoot, "harness-state.json");
   windowPrefsPath = path.join(dataRoot, "window-preferences.json");
   try { windowPinned = Boolean(JSON.parse(fs.readFileSync(windowPrefsPath, "utf8")).alwaysOnTop); } catch { windowPinned = false; }
@@ -1858,49 +1533,19 @@ app.whenReady().then(() => {
     sqlitePath: path.join(dataRoot, "state-index.sqlite"),
     initialStateMode: "empty",
   });
-  guideStore = new GuideStateStore(path.join(dataRoot, "guide-state.json"));
-  guideProbeRunner = createProbeRunner({
-    detectors: {
-      "codex-cli": async () => {
-        const codex = await detectCommand("codex");
-        return { status: codex.installed ? "ok" : "missing", capabilityVersion: codex.version, safeSummary: codex.installed ? "已检测到 Codex CLI" : "未检测到 Codex CLI", remediationActionIds: codex.installed ? [] : ["help.open", "probe.recheck"] };
-      },
-      "codex-desktop": async () => {
-        const codex = await detectCommand("codex");
-        return { status: codex.installed ? "ok" : "missing", safeSummary: codex.installed ? "已检测到 Codex 安装入口；Desktop 可见性仍需实际打开验证" : "未检测到 Codex", remediationActionIds: codex.installed ? [] : ["help.open", "probe.recheck"] };
-      },
-      "codex-login": async () => {
-        const codex = await detectCommand("codex");
-        if (!codex.installed) return { status: "missing", safeSummary: "未检测到 Codex，无法检查登录", remediationActionIds: ["help.open", "probe.recheck"] };
-        try {
-          await listCodexProjects({ executable: codex.path, cwd: projectPath });
-          return { status: "ok", safeSummary: "Codex app-server 已完成只读授权检查", remediationActionIds: [] };
-        } catch (error) {
-          if (/unauth|login|401|403|authorization/i.test(String(error?.message || error))) return { status: "unauth", safeSummary: "已找到 Codex，但尚未验证登录", remediationActionIds: ["probe.recheck"] };
-          throw error;
-        }
-      },
-      "app-server": async () => {
-        const codex = await detectCommand("codex");
-        if (!codex.installed) return { status: "missing", safeSummary: "未检测到 Codex CLI", remediationActionIds: ["help.open"] };
-        await listCodexProjects({ executable: codex.path, cwd: projectPath });
-        return { status: "ok", safeSummary: "当前版本支持实验性 app-server Project 只读检查", remediationActionIds: [] };
-      },
-      "deep-link": async () => ({ status: "unknown", safeSummary: "精确对话打开需在用户触发后以实际结果验证", remediationActionIds: [] }),
-      git: async () => {
-        const git = await detectCommand("git");
-        return { status: git.installed ? "ok" : "missing", safeSummary: git.installed ? "已检测到 Git（仅用于可选证据）" : "未检测到 Git；本地空白项目仍可使用", remediationActionIds: [] };
-      },
-      network: async () => ({ status: "unknown", safeSummary: "未主动发起联网探测", remediationActionIds: [] }),
-      "release-integrity": async () => ({ status: app.isPackaged && fs.existsSync(path.join(process.resourcesPath, "app.asar")) ? "ok" : "unknown", safeSummary: app.isPackaged ? "已找到打包运行时" : "开发模式不代表 Release 完整性", remediationActionIds: [] }),
-    },
-  });
   registerIpc();
+  reconcileTaskLeases("应用恢复时任务 lease 到期");
+  mcpControlServer = createMcpControlServer({
+    dataRoot,
+    handlers: mcpIpcHandlers,
+    channelMeta: mcpChannelMeta,
+    snapshot: buildSnapshot,
+  });
+  void mcpControlServer.start().catch((error) => {
+    try { errorLog?.capture(error, { operation: "mcp-control-server", stage: "start" }); } catch {}
+  });
   createWindow();
   void resumePendingCodexArchives();
-  // Repair projects created by pre-0.0.12 versions in the background. This is
-  // idempotent and safe to retry when Codex is temporarily unavailable.
-  void provisionMissingControlThreads();
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
@@ -1913,8 +1558,13 @@ app.on("window-all-closed", () => {
 
 app.on("before-quit", () => {
   stopRuntimeRefresh();
+  try { mcpControlServer?.close(); } catch {}
   for (const runtime of activeCodexClients.values()) {
     try { runtime.client.close(new Error("Harness 正在退出")); } catch {}
   }
+  for (const runtime of observingCodexThreads.values()) {
+    try { runtime.client.close(new Error("Harness 正在退出")); } catch {}
+  }
   activeCodexClients.clear();
+  observingCodexThreads.clear();
 });

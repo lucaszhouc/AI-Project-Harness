@@ -7,7 +7,7 @@ AI-assisted contributions are welcome, but the contributor must understand and b
 ## Development rules
 
 1. Preserve unrelated working-tree changes. Do not use destructive reset, checkout, clean, force push, or history rewriting.
-2. Keep blank creation local-only, task creation separate from dispatch, and normal review human-gated.
+2. Keep task creation separate from dispatch, normal review human-gated, and Desktop draft requests distinct from verified creation.
 3. Do not add credentials, private paths or project names, transcript bodies, or packaged binaries to Git history.
 4. Install dependencies with `npm ci` and run `npm run check:release`.
 5. For release candidates, also run `npm run qualify:release` and `npm run check:packaged-integrity`.

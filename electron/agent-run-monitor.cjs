@@ -100,12 +100,21 @@ function eventForNotification(message) {
     return { kind: "completed", type: method, progress: 100, phase: "completed", detail: text || "Agent 任务已结束" };
   }
   if (method === "error" || method === "turn/failed") {
+    // The Desktop 原生控制面 emits a recoverable `error` notification while it is
+    // reconnecting the Responses stream.  `willRetry=true` is an explicit
+    // contract signal: the turn is still alive and must remain monitorable.
+    // Treating it as terminal makes Harness close the client immediately,
+    // which interrupts the very turn that Codex is trying to recover.
+    if (params.willRetry === true || params.error?.willRetry === true) {
+      return { kind: "progress", type: method, phase: "reconnecting", detail: text || "Codex 正在重连，任务尚未结束" };
+    }
     return { kind: "failed", type: method, detail: text || params.error?.message || "Agent 运行失败" };
   }
-  if (method === "turn/started") return { kind: "progress", type: method, progress: 12, phase: "thinking", detail: text || "Agent 已开始" };
+  if (method === "turn/started") return { kind: "progress", type: method, phase: "thinking", detail: text || "Agent 已开始" };
   if (method === "turn/updated") {
-    const rawProgress = Number(params.progress ?? turn.progress ?? turn.percentage);
-    const progress = Number.isFinite(rawProgress) ? (rawProgress > 0 && rawProgress <= 1 ? rawProgress * 100 : rawProgress) : 45;
+    const rawProgress = params.progress ?? turn.progress ?? turn.percentage;
+    const progress = typeof rawProgress === "number" && Number.isFinite(rawProgress) && rawProgress >= 0 && rawProgress <= 100
+      ? (rawProgress > 0 && rawProgress <= 1 ? rawProgress * 100 : rawProgress) : undefined;
     return { kind: "progress", type: method, progress, phase: "working", detail: text || "Agent 正在工作" };
   }
   if (method.startsWith("item/")) {
@@ -114,24 +123,33 @@ function eventForNotification(message) {
       : itemType.includes("file") ? "updating_files"
         : itemType.includes("message") ? "reporting"
           : "working";
-    return { kind: "progress", type: method, progress: complete ? 78 : 35, phase, detail: text || `${itemType || "Agent"} ${complete ? "已完成" : "已开始"}` };
+    return { kind: "progress", type: method, phase, detail: text || `${itemType || "Agent"} ${complete ? "已完成" : "已开始"}` };
   }
-  return { kind: "progress", type: method, progress: 40, phase: "working", detail: text || method };
+  return { kind: "progress", type: method, phase: "working", detail: text || method };
 }
 
-function createAgentRunMonitor({ state, projectId, taskId, readGit = async () => undefined, onUpdate = () => {}, onRawMessage = () => {}, autoReview = false, importMode = false, onImportCandidate = () => {} }) {
+function createAgentRunMonitor({ state, projectId, taskId, readGit = async () => undefined, onUpdate = () => {}, onRawMessage = () => {}, autoReview = false, importMode = false, importEvidence = undefined, requireImportKnowledge = false, onImportCandidate = () => {} }) {
   let output = "";
   let terminal = false;
   let candidateSubmitted = false;
+  let publishTimer;
+  let pendingProgress;
   const outputMaxChars = importMode ? IMPORT_OUTPUT_MAX_CHARS : ORDINARY_OUTPUT_MAX_CHARS;
   const project = machine.getProject(state, projectId);
   const task = project.tasks.find((item) => item.id === taskId);
   if (!task) throw new Error("Task not found");
+  // A monitor belongs to one durable Run. If the task is retried after a
+  // timeout, late notifications from the old provider thread must not be
+  // applied to the fresh Run that now occupies the same task record.
+  const boundRunId = task.run?.id;
 
   const currentTask = () => machine.getProject(state, projectId).tasks.find((item) => item.id === taskId);
 
   async function publish(event) {
     if (["completed", "failed"].includes(event?.kind)) {
+      if (publishTimer) clearTimeout(publishTimer);
+      publishTimer = undefined;
+      pendingProgress = undefined;
       const immediate = { project: machine.getProject(state, projectId), task: machine.getProject(state, projectId).tasks.find((item) => item.id === taskId), event, git: project.gitSnapshot };
       await onUpdate(immediate);
       void readGit(project.path).then(async (git) => {
@@ -141,10 +159,25 @@ function createAgentRunMonitor({ state, projectId, taskId, readGit = async () =>
       }).catch(() => undefined);
       return immediate;
     }
-    const git = await readGit(project.path).catch(() => undefined);
-    if (git) machine.recordGitSnapshot(state, projectId, git);
-    const update = { project: machine.getProject(state, projectId), task: machine.getProject(state, projectId).tasks.find((item) => item.id === taskId), event, git };
-    await onUpdate(update);
+    const update = { project: machine.getProject(state, projectId), task: currentTask(), event, git: project.gitSnapshot };
+    if (event?.kind === "refresh") {
+      const git = await readGit(project.path).catch(() => undefined);
+      if (git) machine.recordGitSnapshot(state, projectId, git);
+      update.git = git;
+      await onUpdate(update);
+      return update;
+    }
+    pendingProgress = event;
+    if (!publishTimer) {
+      publishTimer = setTimeout(() => {
+        publishTimer = undefined;
+        const latestEvent = pendingProgress;
+        pendingProgress = undefined;
+        if (!latestEvent || terminal) return;
+        Promise.resolve().then(() => onUpdate({ project: machine.getProject(state, projectId), task: currentTask(), event: latestEvent, git: project.gitSnapshot })).catch(() => undefined);
+      }, 120);
+      publishTimer.unref?.();
+    }
     return update;
   }
 
@@ -155,7 +188,10 @@ function createAgentRunMonitor({ state, projectId, taskId, readGit = async () =>
     const threadId = params.threadId || params.thread?.id;
     const turnId = params.turnId || params.turn?.id;
     const activeTask = currentTask();
-    if (!activeTask?.run) return null;
+    if (!activeTask?.run || (boundRunId && String(activeTask.run.id) !== String(boundRunId))) {
+      terminal = true;
+      return null;
+    }
     if (activeTask.run.externalThreadId && String(threadId || "") !== String(activeTask.run.externalThreadId)) return null;
     if (activeTask.run.externalTurnId && String(turnId || "") !== String(activeTask.run.externalTurnId)) return null;
     const event = eventForNotification(message);
@@ -166,7 +202,7 @@ function createAgentRunMonitor({ state, projectId, taskId, readGit = async () =>
       machine.markRunFailed(state, projectId, taskId, event.detail);
       terminal = true;
     } else if (event.kind === "completed") {
-      const candidate = importMode ? (() => { try { return parseHarnessImport(output); } catch { return null; } })() : parseHarnessResult(output);
+      const candidate = importMode ? (() => { try { return parseHarnessImport(output, { evidence: importEvidence, requireKnowledge: requireImportKnowledge }); } catch { return null; } })() : parseHarnessResult(output);
       const terminalTask = currentTask();
       if (importMode && candidate && !candidateSubmitted && ["in_progress", "awaiting_result"].includes(terminalTask.status)) {
         await onImportCandidate(candidate, { projectId, taskId, threadId, turnId });

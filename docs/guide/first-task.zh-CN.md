@@ -1,3 +1,5 @@
+> Historical material. Desktop-native repair is incomplete; see [current status](../CURRENT_REPAIR_STATUS.md). Older execution and PASS claims do not describe this source revision.
+
 # 第一项任务
 
 1. 点击“新建任务”。

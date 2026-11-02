@@ -12,29 +12,25 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: Use Node.js 20
+      - name: Use Node.js 24
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
           cache: npm
       - name: Install dependencies
         run: npm ci
-      - name: Run static, integration and real Electron smoke
+      - name: Check source and isolated renderer
+        run: npm run check:local && npm run smoke:renderer
+      - name: Smoke isolated Electron
         env:
           APH_SMOKE_REPORT: ${{ github.workspace }}/qa/app-smoke-report.json
-          APH_AUTO_REVIEW_REPORT: ${{ github.workspace }}/qa/auto-review-report.json
-        run: npm run check:release
+        run: npm run smoke:app
+      - name: Smoke isolated MCP handoff
+        run: npm run smoke:mcp-e2e
       - name: Upload smoke report
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: app-smoke-report
           path: qa/app-smoke-report.json
-          if-no-files-found: ignore
-      - name: Upload auto-review smoke report
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: auto-review-smoke-report
-          path: qa/auto-review-report.json
           if-no-files-found: ignore

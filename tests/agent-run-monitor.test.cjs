@@ -88,7 +88,31 @@ test("agent monitor marks failed turns and never leaves a stale in-progress task
   assert.equal(task.run.error, "编译失败");
 });
 
-test("auto-review waits for bound terminal completion and advances only once", async () => {
+test("agent monitor does not terminate a turn on a recoverable Responses reconnect", async () => {
+  const state = machine.createInitialState("C:\\fixture\\reconnect");
+  const project = state.projects[0];
+  const task = machine.createTask(state, project.id, { title: "可恢复断流" });
+  machine.dispatchTask(state, project.id, task.id);
+  machine.attachExternalThread(state, project.id, task.id, { threadId: "thread-reconnect", turnId: "turn-reconnect" });
+  const monitor = createAgentRunMonitor({ state, projectId: project.id, taskId: task.id });
+
+  await monitor.handleNotification({
+    method: "error",
+    params: {
+      threadId: "thread-reconnect",
+      turnId: "turn-reconnect",
+      willRetry: true,
+      error: { message: "Reconnecting... 1/5", codexErrorInfo: { responseStreamDisconnected: {} } },
+    },
+  });
+
+  assert.equal(monitor.isTerminal(), false);
+  assert.equal(task.status, "in_progress");
+  assert.notEqual(task.run.status, "failed");
+  assert.equal(task.run.phase, "reconnecting");
+});
+
+test("formal review waits for terminal completion and requires explicit acceptance", async () => {
   const state = machine.createInitialState("C:\\fixture");
   const project = state.projects[0];
   const task = machine.createTask(state, project.id, { title: "自动审核后结束", criteria: "可验证" });
@@ -101,7 +125,13 @@ test("auto-review waits for bound terminal completion and advances only once", a
   });
   assert.equal(task.status, "in_progress");
   await monitor.handleNotification({ method: "turn/completed", params: { threadId: "thread-late", turnId: "turn-late", turn: { status: "completed" } } });
+  assert.equal(task.status, "review");
+  assert.equal(task.review.evidenceVerified, false);
+  assert.equal(project.revision, 1);
+  machine.acceptTaskResult(state, project.id, task.id);
   assert.equal(task.status, "accepted");
+  await monitor.handleNotification({ method: "turn/completed", params: { threadId: "thread-late", turnId: "turn-late", turn: { status: "completed" } } });
+  assert.equal(project.revision, 2);
   const session = project.sessions.find((item) => item.id === task.run.sessionId);
   assert.equal(task.run.status, "completed");
   assert.equal(session.status, "warm");
@@ -150,6 +180,32 @@ test("repeated output is not resubmitted through a stale task reference after st
     method: "turn/completed",
     params: { threadId: "stale-thread", turnId: "stale-turn", turn: { status: "completed", output: resultText("一次候选") } },
   }));
-  assert.equal(durableTask.status, "accepted");
+  assert.equal(durableTask.status, "review");
+  assert.equal(project.revision, 1);
+  assert.equal(durableTask.candidate.summary, "一次候选");
   assert.equal(durableTask.run.status, "completed");
+});
+
+test("late notifications from a timed-out run cannot mutate its retry", async () => {
+  const state = machine.createInitialState("C:\\fixture\\late-monitor");
+  const project = state.projects[0];
+  project.tasks = [];
+  const task = machine.createTask(state, project.id, { title: "超时后重试" });
+  machine.dispatchTask(state, project.id, task.id);
+  machine.attachExternalThread(state, project.id, task.id, { threadId: "old-thread", turnId: "old-turn" });
+  const oldRunId = task.run.id;
+  const monitor = createAgentRunMonitor({ state, projectId: project.id, taskId: task.id });
+  task.run.leaseStartedAt = "2026-10-01T00:00:00.000Z";
+  machine.expireTaskLeases(state, Date.parse("2026-10-02T00:00:00.000Z"));
+  machine.dispatchTask(state, project.id, task.id);
+  assert.notEqual(task.run.id, oldRunId);
+  const newRunId = task.run.id;
+  await monitor.handleNotification({
+    method: "turn/completed",
+    params: { threadId: "old-thread", turnId: "old-turn", turn: { status: "completed" } },
+  });
+  assert.equal(task.run.id, newRunId);
+  assert.equal(task.status, "in_progress");
+  assert.equal(task.run.status, "starting");
+  assert.equal(monitor.isTerminal(), true);
 });

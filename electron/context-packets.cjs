@@ -63,6 +63,25 @@ function decisionLines(project, max = 6) {
   });
 }
 
+function acceptedKnowledgeLines(project) {
+  const rules = (project.ruleCards || []).filter((item) => item.status === "active").slice(0, 12)
+    .map((item) => `- 规则 · ${clip(item.title, 220)}：${clip(item.statement, 700)}${item.rationale ? `（原因：${clip(item.rationale, 420)}）` : ""}`);
+  const playbooks = (project.playbooks || []).filter((item) => item.status === "active").slice(0, 8)
+    .flatMap((item) => [`- Playbook · ${clip(item.title, 220)} v${Number(item.version || 1)} · 触发：${clip(item.trigger, 500)}`, ...(item.steps || []).slice(0, 8).map((step) => `  ${Number(step.order || 1)}. ${clip(step.action, 600)}`)]);
+  return [...rules, ...playbooks];
+}
+
+function pendingKnowledgeLines(project) {
+  return (project.knowledgeCandidates || []).filter((item) => item.status === "pending").slice(0, 12).flatMap((item) => {
+    const sources = Array.isArray(item.sources) ? item.sources : (item.steps || []).flatMap((step) => step.sources || []);
+    return [
+      `- ${item.type === "playbook" ? "Playbook" : "规则"} · ${clip(item.title, 240)} · ${clip(item.scope, 60)}`,
+      item.type === "playbook" ? `  用途：${clip(item.purpose, 600)}` : `  内容：${clip(item.statement, 600)}`,
+      sources[0]?.quote ? `  用户原话：${clip(sources[0].quote, 700)}` : "",
+    ].filter(Boolean);
+  });
+}
+
 function referencesFor(project) {
   const references = [
     `项目目录：${project.path}`,
@@ -86,6 +105,7 @@ function buildCtoContextPacket(project) {
   const accepted = checkpointLines(project);
   const active = activeTaskLines(project);
   const decisions = decisionLines(project);
+  const knowledge = acceptedKnowledgeLines(project);
   const lines = [
     `# AI Project Harness · CTO Context v${CTO_PACKET_VERSION}`,
     "",
@@ -125,6 +145,9 @@ function buildCtoContextPacket(project) {
     ...(decisions.length ? decisions : ["- 暂无结构化决策记录。"]),
     ...(project.blockers?.length ? project.blockers.slice(0, 6).map((item) => `- 阻塞：${clip(item, 500)}`) : []),
     "",
+    "## 用户规则与 Playbook",
+    ...(knowledge.length ? knowledge : ["- 尚无用户确认的规则或 Playbook；未审核候选不得作为任务约束。"]),
+    "",
     "## CTO 职责",
     "- 这是用户主动进入的长期项目入口：回答项目问题、澄清目标、规划未来工作、拆分可验收任务并决定优先级。",
     "- 不要把本文件当成自动发送指令；用户可以先继续对话，确认后再发送本文件引用。",
@@ -139,6 +162,7 @@ function buildCtoContextPacket(project) {
 function buildReviewContextPacket(project) {
   const control = project.controlSessions || {};
   const candidates = (project.tasks || []).filter((task) => task.status === "review" && task.candidate).slice(0, 8);
+  const knowledgeCandidates = pendingKnowledgeLines(project);
   const lines = [
     `# AI Project Harness · Review Context v${REVIEW_PACKET_VERSION}`,
     "",
@@ -162,6 +186,9 @@ function buildReviewContextPacket(project) {
       task.candidate.acceptance?.length ? `  验收：${task.candidate.acceptance.slice(0, 6).map((item) => `${clip(item.criterion, 180)}=${clip(item.status, 40)}`).join("；")}` : "",
       task.candidate.evidence?.length ? `  证据：${task.candidate.evidence.slice(0, 4).map((item) => `${clip(item.type, 60)}=${clip(item.value, 260)}`).join("；")}` : "",
     ].filter(Boolean)) : ["- 当前没有待审核候选。"]),
+    "",
+    "## 待审核知识候选",
+    ...(knowledgeCandidates.length ? knowledgeCandidates : ["- 当前没有待审核规则或 Playbook。"]),
     "",
     "## 最近已接受进展",
     ...(checkpointLines(project, 3).length ? checkpointLines(project, 3) : ["- 暂无 checkpoint。"]),
